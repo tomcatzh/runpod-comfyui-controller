@@ -4797,7 +4797,7 @@ class ControllerService:
         row["volume"] = enriched_volume
         row.update(self._session_cost_rollup(row, pods, enriched_volume))
         aggregate_seconds = round(sum(float(pod.get("runtime_seconds") or 0) for pod in pods), 3)
-        elapsed_seconds = self._session_elapsed_seconds(row)
+        elapsed_seconds = self._session_elapsed_seconds(row, [*pods, enriched_volume])
         row["elapsed_seconds"] = elapsed_seconds
         row["elapsed"] = self._format_runtime(elapsed_seconds)
         row["aggregate_pod_runtime_seconds"] = aggregate_seconds
@@ -4840,7 +4840,7 @@ class ControllerService:
             enriched = dict(session)
             enriched.update(self._session_cost_rollup(enriched, session_pods, volume))
             aggregate_seconds = round(sum(float(pod.get("runtime_seconds") or 0) for pod in session_pods), 3)
-            elapsed_seconds = self._session_elapsed_seconds(enriched)
+            elapsed_seconds = self._session_elapsed_seconds(enriched, [*session_pods, volume])
             enriched["elapsed_seconds"] = elapsed_seconds
             enriched["elapsed"] = self._format_runtime(elapsed_seconds)
             enriched["aggregate_pod_runtime_seconds"] = aggregate_seconds
@@ -5108,11 +5108,23 @@ class ControllerService:
     def _format_runtime(self, seconds: float) -> str:
         return format_runtime(seconds)
 
-    def _session_elapsed_seconds(self, session: dict[str, Any]) -> float:
+    def _session_elapsed_seconds(self, session: dict[str, Any], resources: list[dict[str, Any] | None] | None = None) -> float:
         state = str(session.get("state") or "")
-        terminal_at = session.get("updated_at") if state in {"reclaimed", "failed", "cleanup_failed"} else None
+        ended = None
+        if state in {"reclaimed", "failed", "cleanup_failed"}:
+            # Billing calibration keeps touching updated_at long after the session
+            # ended, which inflated elapsed time; prefer real resource end stamps.
+            ends = []
+            for row in resources or []:
+                if not row:
+                    continue
+                for key in ("deleted_at", "stopped_at"):
+                    parsed = parse_iso(row.get(key))
+                    if parsed:
+                        ends.append(parsed)
+            ended = max(ends) if ends else parse_iso(session.get("updated_at"))
         started = parse_iso(session.get("created_at"))
-        ended = parse_iso(terminal_at) or utc_now()
+        ended = ended or utc_now()
         if not started or ended < started:
             return 0.0
         return round((ended - started).total_seconds(), 3)
