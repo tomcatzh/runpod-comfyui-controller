@@ -1,12 +1,14 @@
 English | [简体中文](README.zh-CN.md)
 
-# RunPod ComfyUI Controller
+# [RunPod](https://runpod.io?ref=ix73cnib) ComfyUI Controller
 
 [![CI](https://github.com/tomcatzh/runpod-comfyui-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/tomcatzh/runpod-comfyui-controller/actions/workflows/ci.yml)
 
-A local-first session controller that runs interactive [ComfyUI](https://github.com/comfyanonymous/ComfyUI) on cheap [RunPod](https://www.runpod.io/) GPUs — with **money safety as a design constraint**, not an afterthought.
+A local-first session controller that runs interactive [ComfyUI](https://github.com/comfyanonymous/ComfyUI) on cheap [RunPod](https://runpod.io?ref=ix73cnib) GPUs — with **money safety as a design constraint**, not an afterthought.
 
-You upload a ComfyUI workflow JSON; the controller resolves its custom nodes against the Comfy Registry, sizes a network volume from real model metadata, pre-downloads models on cheap CPU pods across several datacenters in parallel, races for the cheapest eligible GPU, configures ComfyUI over SSH, and hands you a ready UI URL. When the session ends, the GPU stops first, every generated image is collected to your local disk through RunPod's S3-compatible API, and the volume is deleted only after collection succeeds.
+[RunPod](https://runpod.io?ref=ix73cnib) is a GPU cloud with per-second billing: consumer cards like the RTX 4090 rent for well under a dollar an hour, network volumes persist data across pods, and an S3-compatible API gets your files out. That makes it a great fit for bursty ComfyUI sessions — as long as something trustworthy shuts everything down and collects the outputs. That something is this controller.
+
+You upload a ComfyUI workflow JSON; the controller resolves its custom nodes against the Comfy Registry, sizes a network volume from real model metadata, pre-downloads models on cheap CPU pods across several datacenters in parallel, races for the cheapest eligible GPU, configures ComfyUI over SSH, and hands you a ready UI URL. When the session ends, the GPU stops first, every generated image is collected to your local disk through [RunPod](https://runpod.io?ref=ix73cnib)'s S3-compatible API, and the volume is deleted only after collection succeeds.
 
 Zero Python dependencies — standard library only. One SQLite file holds all state.
 
@@ -17,11 +19,11 @@ Running ComfyUI on rented GPUs usually means either a SaaS subscription or hand-
 - **A hard cap on spend, not time.** Every session carries a `Max total $` budget; the watchdog recomputes live spend each tick and force-reclaims at the cap (warning at 90%). An actively used session is never killed by the clock.
 - **No silent losses.** Output collection is a gate, not best-effort: ComfyUI is forced to write outputs onto the network volume, a background collector mirrors them locally every few minutes, and shutdown refuses to delete the volume until a final collection succeeds.
 - **No orphans.** Provider deletes are fail-closed (`cleanup_failed` is surfaced, never hidden), every candidate resource is scoped to its session, and a startup sweep reclaims anything a crash left behind.
-- **Honest accounting.** Costs start as runtime estimates and are calibrated against real RunPod billing records by an in-server worker.
+- **Honest accounting.** Costs start as runtime estimates and are calibrated against real [RunPod](https://runpod.io?ref=ix73cnib) billing records by an in-server worker.
 
 ## Requirements
 
-- A RunPod account, an API key, and an S3 API key pair (Settings → S3 API Keys)
+- A [RunPod](https://runpod.io?ref=ix73cnib) account, an API key, and an S3 API key pair (Settings → S3 API Keys)
 - Docker (any recent version; tested with OrbStack/Docker Compose), **or** bare Python ≥ 3.11
 - Optional: Hugging Face / Civitai read tokens for gated model downloads
 

@@ -1,12 +1,14 @@
 [English](README.md) | 简体中文
 
-# RunPod ComfyUI Controller
+# [RunPod](https://runpod.io?ref=ix73cnib) ComfyUI Controller
 
 [![CI](https://github.com/tomcatzh/runpod-comfyui-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/tomcatzh/runpod-comfyui-controller/actions/workflows/ci.yml)
 
-一个本地优先的会话控制器，在廉价的 [RunPod](https://www.runpod.io/) GPU 上运行交互式 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) —— **把资金安全作为设计约束**，而不是事后补丁。
+一个本地优先的会话控制器，在廉价的 [RunPod](https://runpod.io?ref=ix73cnib) GPU 上运行交互式 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) —— **把资金安全作为设计约束**，而不是事后补丁。
 
-你上传一个 ComfyUI 工作流 JSON；控制器自动对照 Comfy Registry 解析自定义节点、根据真实模型元数据计算网络卷容量、在多个机房并行用廉价 CPU Pod 预下载模型、抢占最便宜的合格 GPU、通过 SSH 配置好 ComfyUI，然后把就绪的 UI 地址交给你。会话结束时，先停 GPU，再通过 RunPod 兼容 S3 的 API 把每一张生成的图片采集到本地磁盘，**采集成功后才删除网络卷**。
+[RunPod](https://runpod.io?ref=ix73cnib) 是一个按秒计费的 GPU 云：RTX 4090 这类消费级显卡每小时租金远低于一美元，网络卷可以跨 Pod 持久化数据，还提供兼容 S3 的 API 把文件取回本地。这让它非常适合突发式的 ComfyUI 出图会话——前提是有个靠谱的东西负责关机和收图。这个控制器就是那个东西。
+
+你上传一个 ComfyUI 工作流 JSON；控制器自动对照 Comfy Registry 解析自定义节点、根据真实模型元数据计算网络卷容量、在多个机房并行用廉价 CPU Pod 预下载模型、抢占最便宜的合格 GPU、通过 SSH 配置好 ComfyUI，然后把就绪的 UI 地址交给你。会话结束时，先停 GPU，再通过 [RunPod](https://runpod.io?ref=ix73cnib) 兼容 S3 的 API 把每一张生成的图片采集到本地磁盘，**采集成功后才删除网络卷**。
 
 零 Python 依赖——只用标准库。全部状态存在一个 SQLite 文件里。
 
@@ -17,11 +19,11 @@
 - **硬上限是花费，不是时间。** 每个会话带一个 `Max total $` 预算；看门狗每个周期重算实时花费，到达预算强制回收（90% 时预警）。正在使用中的会话永远不会被时钟杀死。
 - **不静默丢失任何东西。** 输出采集是门槛而非尽力而为：ComfyUI 被强制把输出写到网络卷上，后台采集器每几分钟镜像到本地，关闭流程在最终采集成功前拒绝删卷。
 - **不留孤儿资源。** 供应商删除调用采用 fail-closed 语义（`cleanup_failed` 会被暴露而非隐藏），每个候选资源都限定在自己的会话范围内，启动时的清扫会回收崩溃遗留的一切。
-- **诚实记账。** 成本先按运行时长估算，随后由 server 内置的账单 worker 对照 RunPod 真实账单记录校准。
+- **诚实记账。** 成本先按运行时长估算，随后由 server 内置的账单 worker 对照 [RunPod](https://runpod.io?ref=ix73cnib) 真实账单记录校准。
 
 ## 环境要求
 
-- RunPod 账号、API key，以及一对 S3 API key（Settings → S3 API Keys）
+- [RunPod](https://runpod.io?ref=ix73cnib) 账号、API key，以及一对 S3 API key（Settings → S3 API Keys）
 - Docker（任意较新版本；已在 OrbStack/Docker Compose 验证），**或** 裸 Python ≥ 3.11
 - 可选：Hugging Face / Civitai 只读 token，用于下载需要授权的模型
 
