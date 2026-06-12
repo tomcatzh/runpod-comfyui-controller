@@ -2519,6 +2519,11 @@ class ControllerServiceTest(unittest.TestCase):
         self.assertNotIn(volume_id, sweep.get("volumes_deleted") or [])
         self.assertNotEqual(service.db.get("network_volumes", volume_id)["state"], "deleted")
 
+        # Dry run reports the warm match without claiming it.
+        dry = service.dry_run_resource_request(launch)
+        self.assertEqual((dry.get("warm_volume") or {}).get("id"), volume_id)
+        self.assertEqual(service.db.get("network_volumes", volume_id)["retention_policy"], "warm")
+
         second = service.create_resource_request(launch)
         session2 = service.get_session(second["session_id"])
         self.assertEqual(session2["state"], "interactive_ready")

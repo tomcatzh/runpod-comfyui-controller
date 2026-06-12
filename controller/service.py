@@ -253,12 +253,19 @@ class ControllerService:
                     ],
                 }
             )
+        warm_volume = self._find_warm_volume(assets, size_gb, data_centers, claim=False)
         return {
             "ok": True,
             "dry_run": True,
             "creates_resources": False,
             "product": product,
             "mode": str(payload.get("mode") or "interactive"),
+            "warm_volume": {
+                "id": warm_volume.get("id"),
+                "data_center_id": warm_volume.get("data_center_id"),
+                "size_gb": warm_volume.get("size_gb"),
+                "warm_expires_at": warm_volume.get("warm_expires_at"),
+            } if warm_volume else None,
             "volume_size_gb": size_gb,
             "volume_status": volume_status,
             "asset_count": len(assets),
@@ -4000,7 +4007,7 @@ class ControllerService:
             {"session_id": session_id, "warm_expires_at": expires, "size_gb": volume.get("size_gb"), "data_center_id": volume.get("data_center_id")},
         )
 
-    def _claim_warm_volume(self, assets: list[dict[str, Any]], size_gb: int, data_centers: list[str]) -> dict[str, Any] | None:
+    def _find_warm_volume(self, assets: list[dict[str, Any]], size_gb: int, data_centers: list[str], *, claim: bool) -> dict[str, Any] | None:
         if not assets:
             return None
         key = self._launch_assets_key(assets)
@@ -4017,6 +4024,8 @@ class ControllerService:
                 continue
             if int(volume.get("size_gb") or 0) < int(size_gb or 0):
                 continue
+            if not claim:
+                return volume
             self.db.update(
                 "network_volumes",
                 volume["id"],
@@ -4024,6 +4033,9 @@ class ControllerService:
             )
             return self.db.get("network_volumes", volume["id"])
         return None
+
+    def _claim_warm_volume(self, assets: list[dict[str, Any]], size_gb: int, data_centers: list[str]) -> dict[str, Any] | None:
+        return self._find_warm_volume(assets, size_gb, data_centers, claim=True)
 
     def _complete_warm_hydration(self, hydration_id: str, volume_id: str) -> dict[str, Any] | None:
         now = utc_iso()

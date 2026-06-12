@@ -1346,8 +1346,12 @@ def comfyui_new_script() -> str:
         const rate = gpu.quoted_cost_usd_per_hr ?? gpu.estimated_cost_usd_per_hr;
         return `${gpu.gpu_type_id || ""}${rate ? " " + money(rate) + "/hr" : ""}${gpu.stock_status ? " " + gpu.stock_status : ""}`;
       }).join(", "))}</td></tr>`).join("");
+    const warmNote = result.warm_volume
+      ? `<p><strong>♨ ${esc(T("Warm volume available in"))} ${esc(result.warm_volume.data_center_id || "")}</strong> — ${esc(T("model pre-download will be skipped (~3-6 min to ready)."))}</p>`
+      : "";
     target.innerHTML = `
       <h2>${esc(T("Dry run result"))}</h2>
+      ${warmNote}
       <section class="metrics">
         <div class="metric"><strong>${Number(result.data_center_count || 0)}</strong>${esc(T("Datacenters"))}</div>
         <div class="metric"><strong>${Number(result.candidate_count || 0)}</strong>${esc(T("GPU rows"))}</div>

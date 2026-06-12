@@ -393,6 +393,8 @@ ZH: dict[str, str] = {
     "Hydrated volumes kept for fast relaunch. Reused automatically when a session needs the same models; auto-deleted after the idle TTL.": "为快速重启保留的已灌注卷。新会话需要相同模型时自动复用；闲置超时后自动删除。",
     "Delete this warm volume? The next launch with these models will re-download them.": "删除这个温卷？下次使用这些模型时需要重新下载。",
     "Delete now": "立即删除",
+    "Warm volume available in": "温卷可用：",
+    "model pre-download will be skipped (~3-6 min to ready).": "将跳过模型预下载（预计 3~6 分钟就绪）。",
     "Kept since": "保留自",
     "Expires": "过期时间",
     "Volume": "卷",
