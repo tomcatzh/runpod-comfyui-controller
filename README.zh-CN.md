@@ -88,7 +88,7 @@ python3 -m controller.server
    配置好的工作流可以**导出为分享包**（zip 内含工作流 JSON、锁定的节点和模型链接，token 已剥离）；在另一台控制器上导入该 zip，一次上传即可恢复全部配置。
 2. 控制器在兼容机房间展开：每个机房一个网络卷加一个廉价 CPU Pod，并行下载你的模型。预下载完成的候选**串行**抢 GPU（同一时刻只有一台付费 GPU）；某个候选环境配置失败时，下一个已就绪的候选自动接棒。
 3. 会话到达 `interactive_ready` 后，打开 ComfyUI 地址——**画布上已经载入你的工作流**，且模型加载节点的引用已被改写为卷上实际存在的文件（在库里换模型链接后无需再到 ComfyUI 里手改文件名）。输出每几分钟镜像到 `<数据目录>/artifacts/sessions/<id>/outputs/`。
-4. **关闭**会先停 GPU，再做最终输出采集，之后才删除卷。如果采集失败、或一个交互过的会话没采到任何输出，卷会被保留以便恢复——丢弃它需要显式的 `discard_outputs` 操作。
+4. **关闭**会先停 GPU，再做最终输出采集，之后才处理卷。默认关闭会**保留已灌注模型的温卷**，下次使用相同模型的会话直接跳过整个预下载阶段（就绪约 3–6 分钟，而非 7–12 分钟）；温卷在 Dashboard 上可见（含费用），闲置超时后自动删除（`WARM_VOLUME_IDLE_TTL_HOURS`，默认 72 小时，40GB 约 $0.09/天）。「关闭并删卷」则立即删除。强制回收（花费上限、空闲超时）默认保留温卷。如果采集失败、或一个交互过的会话没采到任何输出，卷会被保留以便恢复——丢弃它需要显式的 `discard_outputs` 操作。
 
 界面是双语的：跟随浏览器语言（默认英文，中文通过 `Accept-Language` 或 `?lang=zh`）。所有时间按你的本地时区显示；存储保持 UTC。
 
@@ -104,6 +104,7 @@ python3 -m controller.server
 | `CONTROLLER_HOST` / `CONTROLLER_PORT` | `127.0.0.1` / `8088` | 监听地址与端口 |
 | `IDLE_SHUTDOWN_MINUTES` | `20` | 空闲回收窗口（续租可推后） |
 | `OUTPUT_COLLECTOR_INTERVAL_SECONDS` | `300` | 后台输出镜像间隔 |
+| `WARM_VOLUME_IDLE_TTL_HOURS` | `72` | 温卷闲置多久后自动删除 |
 | `BILLING_WORKER_POLL_INTERVAL_SECONDS` | `600` | 账单校准轮询间隔 |
 | `DEFAULT_VOLUME_SIZE_GB`、`DEFAULT_DATA_CENTER` 等 | 见 `controller/config.py` | 规划默认值 |
 

@@ -542,6 +542,9 @@ class Database:
                 "billed_end_at": "TEXT",
                 "billed_time_ms": "INTEGER",
                 "billing_source": "TEXT",
+                "warm_expires_at": "TEXT",
+                "warm_assets_key": "TEXT",
+                "warm_session_id": "TEXT",
             },
         )
         self._ensure_table_columns(

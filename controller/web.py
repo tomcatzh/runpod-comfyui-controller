@@ -313,9 +313,37 @@ def dashboard(report: dict[str, Any]) -> bytes:
   <div class="metric"><strong data-summary-key="effective_storage_cost_usd" data-format="money">${summary['effective_storage_cost_usd']:.6f}</strong>{t("Storage spend")}</div>
 </section>
 {session_cards(active_sessions)}
+{warm_volume_cards(volumes)}
 {live_refresh_script(baseline)}
 """
     return page("RunPod Controller", body, nav="active")
+
+
+def warm_volume_cards(volumes: list[dict[str, Any]]) -> str:
+    warm = [v for v in volumes if str(v.get("retention_policy") or "") == "warm" and str(v.get("state") or "") != "deleted"]
+    if not warm:
+        return ""
+    rows = []
+    for volume in warm:
+        volume_id = html.escape(str(volume.get("id") or ""))
+        cost = f"${float(volume.get('effective_cost_usd') or volume.get('estimated_cost_usd') or 0):.4f}"
+        rows.append(
+            f"<tr><td><code>{volume_id}</code></td>"
+            f"<td>{html.escape(str(volume.get('data_center_id') or '-'))}</td>"
+            f"<td>{html.escape(str(volume.get('size_gb') or '-'))} GB</td>"
+            f"<td>{html.escape(fmt_timestamp(volume.get('updated_at')) or '-')}</td>"
+            f"<td>{html.escape(fmt_timestamp(volume.get('warm_expires_at')) or '-')}</td>"
+            f"<td>{cost}</td>"
+            f'<td><button class="danger" data-post="/api/v1/volumes/{volume_id}/delete" data-body="{{}}" data-redirect="back" '
+            f'data-confirm="{t("Delete this warm volume? The next launch with these models will re-download them.")}">{t("Delete now")}</button></td></tr>'
+        )
+    return (
+        f'<section class="card"><h3>{t("Warm volumes")}</h3>'
+        f'<div class="subtle">{t("Hydrated volumes kept for fast relaunch. Reused automatically when a session needs the same models; auto-deleted after the idle TTL.")}</div>'
+        f'<div class="table-wrap"><table><thead><tr>'
+        f'<th>{t("Volume")}</th><th>{t("Datacenter")}</th><th>{t("Size")}</th><th>{t("Kept since")}</th><th>{t("Expires")}</th><th>{t("Cost")}</th><th></th>'
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div></section>"
+    )
 
 
 def session_cards(sessions: list[dict[str, Any]]) -> str:
@@ -1764,8 +1792,10 @@ def session_header(session: dict[str, Any], active_tab: str) -> str:
     shutdown = ""
     if has_active_controls:
         shutdown = (
-            f'<button class="danger" data-post="/api/v1/sessions/{session_id}/reclaim" data-body=\'{{"force":true}}\' data-redirect="back" '
-            f'data-confirm="{t("Shutdown session")} {session_id}? {t("This stops GPU compute first, collects ComfyUI outputs through S3, then deletes the network volume only after collection succeeds.")}"{shutdown_disabled}>{t("Shutdown: stop GPU + collect outputs")}</button>'
+            f'<button class="danger" data-post="/api/v1/sessions/{session_id}/reclaim" data-body=\'{{"force":true,"keep_volume":true}}\' data-redirect="back" '
+            f'data-confirm="{t("Shutdown session")} {session_id}? {t("This stops GPU compute first, collects ComfyUI outputs through S3, then keeps the hydrated volume warm for fast relaunch (auto-deleted after the idle TTL).")}"{shutdown_disabled}>{t("Shutdown (keep warm volume)")}</button>'
+            f'<button class="danger" data-post="/api/v1/sessions/{session_id}/reclaim" data-body=\'{{"force":true,"keep_volume":false}}\' data-redirect="back" '
+            f'data-confirm="{t("Shutdown session")} {session_id}? {t("This stops GPU compute first, collects ComfyUI outputs through S3, then deletes the network volume only after collection succeeds.")}"{shutdown_disabled}>{t("Shutdown + delete volume")}</button>'
         )
     return f"""
 <section class="page-head">

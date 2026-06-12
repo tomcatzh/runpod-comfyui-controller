@@ -1661,6 +1661,21 @@ class ControllerService:
         if launch_context.get("probe_result"):
             self._workflow_event(workflow_id, session_id, None, "dependency_probe_passed", "Cached or live CPU dependency probe passed", launch_context["probe_result"])
         candidate_ids = [self._create_candidate(workflow_id, session_id, candidate) for candidate in candidates]
+        warm_volume = self._claim_warm_volume(assets, size_gb, [str(c.get("data_center_id")) for c in candidates])
+        if warm_volume:
+            for candidate_id in candidate_ids:
+                row = self.db.get("workflow_candidates", candidate_id)
+                if row and str(row.get("data_center_id")) == str(warm_volume.get("data_center_id")):
+                    self._update_candidate(candidate_id, {"volume_id": warm_volume["id"]})
+                    self._workflow_event(
+                        workflow_id,
+                        session_id,
+                        candidate_id,
+                        "warm_volume_reused",
+                        f"{warm_volume.get('data_center_id')} reuses a warm hydrated volume; CPU hydration skipped",
+                        {"volume_id": warm_volume["id"], "size_gb": warm_volume.get("size_gb")},
+                    )
+                    break
         self.db.update(
             "resource_requests",
             request_id,
@@ -1991,10 +2006,14 @@ class ControllerService:
             if not candidate:
                 return
             try:
+                warm_volume_id = candidate.get("volume_id")
                 self._update_candidate(candidate_id, {"state": "volume_creating", "download_total_bytes": total_bytes})
                 dc = candidate["data_center_id"]
-                volume_payload = self.adapter.create_network_volume(name=f"rpc-{session_id}-{dc.lower()}", size_gb=size_gb, data_center_id=dc)
-                volume_id = self._record_volume(volume_payload, f"rpc-{session_id}-{dc.lower()}", size_gb, dc, {"retention_policy": "delete_after_collection"})
+                if warm_volume_id:
+                    volume_id = warm_volume_id
+                else:
+                    volume_payload = self.adapter.create_network_volume(name=f"rpc-{session_id}-{dc.lower()}", size_gb=size_gb, data_center_id=dc)
+                    volume_id = self._record_volume(volume_payload, f"rpc-{session_id}-{dc.lower()}", size_gb, dc, {"retention_policy": "delete_after_collection"})
                 self._update_candidate(candidate_id, {"volume_id": volume_id, "state": "cpu_pod_starting"})
                 if winner_event.is_set():
                     self._cleanup_loser(candidate_id, session_id=session_id, workflow_id=workflow_id)
@@ -2017,11 +2036,14 @@ class ControllerService:
                     self._cleanup_loser(candidate_id, session_id=session_id, workflow_id=workflow_id)
                     return
 
-                def on_cpu_pod_created(pod_id: str) -> None:
-                    self._update_candidate(candidate_id, {"cpu_pod_id": pod_id, "state": "cpu_hydrating"})
-                    self._workflow_event(workflow_id, session_id, candidate_id, "cpu_pod_created", f"{dc} CPU hydration Pod created", {"pod_id": pod_id})
+                if warm_volume_id:
+                    hydration = self._complete_warm_hydration(hydration["id"], volume_id) or hydration
+                else:
+                    def on_cpu_pod_created(pod_id: str) -> None:
+                        self._update_candidate(candidate_id, {"cpu_pod_id": pod_id, "state": "cpu_hydrating"})
+                        self._workflow_event(workflow_id, session_id, candidate_id, "cpu_pod_created", f"{dc} CPU hydration Pod created", {"pod_id": pod_id})
 
-                hydration = self._process_hydration(hydration["id"], run_cpu_pod=True, on_cpu_pod_created=on_cpu_pod_created) or hydration
+                    hydration = self._process_hydration(hydration["id"], run_cpu_pod=True, on_cpu_pod_created=on_cpu_pod_created) or hydration
                 self._update_candidate(
                     candidate_id,
                     {
@@ -2031,7 +2053,14 @@ class ControllerService:
                         "state": "hydrated",
                     },
                 )
-                self._workflow_event(workflow_id, session_id, candidate_id, "hydrated", f"{dc} CPU hydration completed", {"volume_id": volume_id})
+                self._workflow_event(
+                    workflow_id,
+                    session_id,
+                    candidate_id,
+                    "hydrated",
+                    f"{dc} warm volume verified; hydration skipped" if warm_volume_id else f"{dc} CPU hydration completed",
+                    {"volume_id": volume_id, "warm_reuse": bool(warm_volume_id)},
+                )
                 if winner_event.is_set():
                     self._cleanup_loser(candidate_id, session_id=session_id, workflow_id=workflow_id)
                     return
@@ -2400,13 +2429,13 @@ class ControllerService:
     def terminate_workflow(self, session_id: str) -> dict[str, Any]:
         workflow = self._latest_workflow(session_id)
         if not workflow:
-            return self.reclaim_session(session_id, {"force": True})
+            return self.reclaim_session(session_id, {"force": True, "keep_volume": True})
         errors = []
         for candidate in self.db.query("SELECT * FROM workflow_candidates WHERE workflow_id = ?", (workflow["id"],)):
             if candidate.get("state") not in {"won", "deleted"}:
                 result = self._cleanup_loser(candidate["id"], session_id=session_id, workflow_id=workflow["id"])
                 errors.extend(result.get("errors") or [])
-        result = self.reclaim_session(session_id, {"force": True})
+        result = self.reclaim_session(session_id, {"force": True, "keep_volume": True})
         workflow_state = "terminated" if result.get("ok") else str(result.get("state") or "cleanup_failed")
         self.db.update("session_workflows", workflow["id"], {"state": workflow_state, "updated_at": utc_iso(), "completed_at": utc_iso() if result.get("ok") else None})
         self._workflow_event(workflow["id"], session_id, None, "terminated", "Workflow termination requested; GPU stopped before output collection", {"reclaim": result})
@@ -3904,6 +3933,27 @@ class ControllerService:
             if session.get("network_volume_id"):
                 volume_owner[str(session["network_volume_id"])] = session["id"]
         for volume in self.db.query("SELECT * FROM network_volumes WHERE state != 'deleted'"):
+            if str(volume.get("retention_policy") or "") == "warm":
+                # Warm volumes outlive their session by design; the sweep is
+                # also their TTL enforcer. Nothing can write to a detached
+                # volume after the final collection succeeded, so expiry
+                # deletion needs no re-collection.
+                expires = parse_iso(volume.get("warm_expires_at"))
+                if expires and utc_now() < expires:
+                    continue
+                error = self._delete_volume_record(volume)
+                if error:
+                    results["errors"].append(error)
+                else:
+                    results["volumes_deleted"].append(volume["id"])
+                    self.audit(
+                        "network_volume",
+                        volume["id"],
+                        "warm_volume_expired",
+                        "Warm volume idle TTL expired; volume deleted",
+                        {"warm_expires_at": volume.get("warm_expires_at"), "warm_session_id": volume.get("warm_session_id")},
+                    )
+                continue
             owner_id = volume_owner.get(str(volume["id"]))
             owner = sessions.get(str(owner_id)) if owner_id else None
             if owner and str(owner.get("state") or "") in keep_volume_states:
@@ -3918,6 +3968,92 @@ class ControllerService:
         if any(results.values()):
             self.audit("controller", "startup", "orphan_sweep", "Startup orphan reconciliation", results)
         return results
+
+    def _launch_assets_key(self, assets: list[dict[str, Any]]) -> str:
+        return sha256_text(json_dumps(normalize_asset_manifest(assets or [])))
+
+    def _session_launch_assets(self, session_id: str) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            "SELECT assets_json FROM session_workflows WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+            (session_id,),
+        )
+        return json_loads(rows[0].get("assets_json"), []) if rows else []
+
+    def _mark_volume_warm(self, volume: dict[str, Any], session_id: str) -> None:
+        expires = (utc_now() + dt.timedelta(hours=self.settings.warm_volume_idle_ttl_hours)).isoformat()
+        self.db.update(
+            "network_volumes",
+            volume["id"],
+            {
+                "retention_policy": "warm",
+                "warm_expires_at": expires,
+                "warm_assets_key": self._launch_assets_key(self._session_launch_assets(session_id)),
+                "warm_session_id": session_id,
+                "updated_at": utc_iso(),
+            },
+        )
+        self.audit(
+            "network_volume",
+            volume["id"],
+            "volume_kept_warm",
+            "Hydrated network volume kept warm for reuse",
+            {"session_id": session_id, "warm_expires_at": expires, "size_gb": volume.get("size_gb"), "data_center_id": volume.get("data_center_id")},
+        )
+
+    def _claim_warm_volume(self, assets: list[dict[str, Any]], size_gb: int, data_centers: list[str]) -> dict[str, Any] | None:
+        if not assets:
+            return None
+        key = self._launch_assets_key(assets)
+        rows = self.db.query(
+            "SELECT * FROM network_volumes WHERE retention_policy = 'warm' AND state != 'deleted' AND warm_assets_key = ? ORDER BY updated_at DESC",
+            (key,),
+        )
+        now = utc_now()
+        for volume in rows:
+            expires = parse_iso(volume.get("warm_expires_at"))
+            if not expires or now >= expires:
+                continue
+            if str(volume.get("data_center_id")) not in data_centers:
+                continue
+            if int(volume.get("size_gb") or 0) < int(size_gb or 0):
+                continue
+            self.db.update(
+                "network_volumes",
+                volume["id"],
+                {"retention_policy": "delete_after_collection", "warm_expires_at": None, "warm_session_id": None, "updated_at": utc_iso()},
+            )
+            return self.db.get("network_volumes", volume["id"])
+        return None
+
+    def _complete_warm_hydration(self, hydration_id: str, volume_id: str) -> dict[str, Any] | None:
+        now = utc_iso()
+        ttl_until = (utc_now() + dt.timedelta(hours=self.settings.hydration_ttl_hours)).isoformat()
+        self.db.update(
+            "hydration_requests",
+            hydration_id,
+            {"state": "hydrated", "ttl_until": ttl_until, "completed_at": now, "updated_at": now},
+        )
+        self.db.update(
+            "network_volumes",
+            volume_id,
+            {"hydration_state": "hydrated", "hydration_ttl_until": ttl_until, "state": "hydrated", "updated_at": now},
+        )
+        self.audit("hydration", hydration_id, "hydrated", "Warm volume reused; CPU hydration skipped", {"volume_id": volume_id})
+        return self.db.get("hydration_requests", hydration_id)
+
+    def delete_warm_volume(self, volume_id: str) -> dict[str, Any]:
+        volume = self.db.get("network_volumes", volume_id)
+        if not volume:
+            raise KeyError(volume_id)
+        if volume.get("state") == "deleted":
+            return {"ok": True, "id": volume_id, "state": "deleted"}
+        if str(volume.get("retention_policy") or "") != "warm":
+            return {"ok": False, "id": volume_id, "error": "volume_not_warm"}
+        error = self._delete_volume_record(volume)
+        if error:
+            return {"ok": False, "id": volume_id, "error": error}
+        self.audit("network_volume", volume_id, "warm_volume_deleted", "Warm volume deleted manually", {"warm_session_id": volume.get("warm_session_id")})
+        return {"ok": True, "id": volume_id, "state": "deleted"}
 
     def reclaim_session(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         session = self.db.get("sessions", session_id)
@@ -4054,10 +4190,18 @@ class ControllerService:
                 error = self._delete_pod_record(pod)
                 if error:
                     errors.append(error)
+        # discard_outputs means "get rid of this volume's data"; keeping it warm
+        # would contradict that, so keep only applies to the normal path.
+        keep_volume = bool(payload.get("keep_volume")) and not bool(payload.get("discard_outputs"))
+        volume_kept_warm = False
         if volume and volume["state"] != "deleted":
-            error = self._delete_volume_record(volume)
-            if error:
-                errors.append(error)
+            if keep_volume:
+                self._mark_volume_warm(volume, session_id)
+                volume_kept_warm = True
+            else:
+                error = self._delete_volume_record(volume)
+                if error:
+                    errors.append(error)
         if errors:
             self.db.update("sessions", session_id, {"state": "cleanup_failed", "phase": "cleanup_failed", "watchdog_last_reason": "; ".join(errors), "updated_at": utc_iso()})
             self._refresh_session_estimated_rollup(session_id)
@@ -4075,8 +4219,8 @@ class ControllerService:
             },
         )
         self._refresh_session_estimated_rollup(session_id)
-        self.audit("session", session_id, "reclaimed", "Session resources reclaimed after output collection", {"force": force, "collection": collection})
-        return {"ok": True, "state": "reclaimed", "session_id": session_id, "collection": collection}
+        self.audit("session", session_id, "reclaimed", "Session resources reclaimed after output collection", {"force": force, "collection": collection, "volume_kept_warm": volume_kept_warm})
+        return {"ok": True, "state": "reclaimed", "session_id": session_id, "collection": collection, "volume_kept_warm": volume_kept_warm}
 
     def _legacy_reclaim_session(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         session = self.db.get("sessions", session_id)
@@ -4199,7 +4343,9 @@ class ControllerService:
                         "updated_at": utc_iso(),
                     },
                 )
-            reclaim = self.reclaim_session(session_id, {"force": True})
+            # Forced reclaims (cost cap, idle, lease) keep the hydrated volume
+            # warm by default: the user will likely relaunch soon.
+            reclaim = self.reclaim_session(session_id, {"force": True, "keep_volume": True})
             return {"ok": True, "action": action, "reason": reason, "reclaim": reclaim}
         return {"ok": True, "action": action, "reason": reason, "session": self.get_session(session_id)}
 

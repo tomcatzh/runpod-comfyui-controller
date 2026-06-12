@@ -30,6 +30,7 @@ class Settings:
     hydration_poll_interval_seconds: int
     hydration_timeout_seconds: int
     hydration_ttl_hours: int
+    warm_volume_idle_ttl_hours: int
     billing_worker_poll_interval_seconds: int
     billing_worker_bucket_size: str
     billing_cpu_absent_grace_hours: int
@@ -140,6 +141,7 @@ def load_settings() -> Settings:
         hydration_poll_interval_seconds=int(os.environ.get("HYDRATION_POLL_INTERVAL_SECONDS", "10")),
         hydration_timeout_seconds=int(os.environ.get("HYDRATION_TIMEOUT_SECONDS", "7200")),
         hydration_ttl_hours=int(os.environ.get("HYDRATION_TTL_HOURS", "24")),
+        warm_volume_idle_ttl_hours=int(os.environ.get("WARM_VOLUME_IDLE_TTL_HOURS", "72")),
         billing_worker_poll_interval_seconds=int(os.environ.get("BILLING_WORKER_POLL_INTERVAL_SECONDS", "600")),
         billing_worker_bucket_size=os.environ.get("BILLING_WORKER_BUCKET_SIZE", "hour"),
         billing_cpu_absent_grace_hours=int(os.environ.get("BILLING_CPU_ABSENT_GRACE_HOURS", "24")),

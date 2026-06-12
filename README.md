@@ -88,7 +88,7 @@ Open <http://localhost:8088>. The data directory defaults to `~/runpod-controlle
    A prepared workflow can be **exported as a shareable package** (a zip with the workflow JSON plus locked nodes and model URLs, tokens stripped); importing the zip on another controller restores everything in one upload.
 2. The controller fans out across compatible datacenters: one network volume plus one cheap CPU pod each, downloading your models in parallel. Hydrated candidates then race for a GPU **serially** (only one paid GPU at a time); if environment configuration fails on one, the next hydrated candidate takes over.
 3. When the session is `interactive_ready`, open the ComfyUI URL — **your workflow is already loaded on the canvas**, with model loader references rewritten to the files actually placed on the volume (so swapping a model URL in the library needs no manual edits in ComfyUI). Outputs are mirrored to `<data dir>/artifacts/sessions/<id>/outputs/` every few minutes.
-4. **Shutdown** stops the GPU first, runs a final output collection, and only then deletes the volume. If collection fails or finds nothing for a session that was interactive, the volume is retained for recovery — discarding it requires an explicit `discard_outputs` action.
+4. **Shutdown** stops the GPU first, runs a final output collection, and only then touches the volume. The default shutdown **keeps the hydrated volume warm** so the next session with the same models skips the entire pre-download phase (≈3–6 min to ready instead of 7–12); warm volumes appear on the dashboard with their cost and auto-delete after an idle TTL (`WARM_VOLUME_IDLE_TTL_HOURS`, default 72h, ≈$0.09/day for 40 GB). "Shutdown + delete volume" removes it immediately. Forced reclaims (cost cap, idle) keep the volume warm. If collection fails or finds nothing for a session that was interactive, the volume is retained for recovery — discarding it requires an explicit `discard_outputs` action.
 
 The UI is bilingual: it follows your browser language (English default, 中文 via `Accept-Language` or `?lang=zh`). All timestamps render in your local timezone; storage stays UTC.
 
@@ -104,6 +104,7 @@ Everything is environment-driven; the important ones:
 | `CONTROLLER_HOST` / `CONTROLLER_PORT` | `127.0.0.1` / `8088` | Bind address and port |
 | `IDLE_SHUTDOWN_MINUTES` | `20` | Idle reclaim window (lease extensions push it out) |
 | `OUTPUT_COLLECTOR_INTERVAL_SECONDS` | `300` | Background output mirror interval |
+| `WARM_VOLUME_IDLE_TTL_HOURS` | `72` | Idle TTL before a kept-warm volume is auto-deleted |
 | `BILLING_WORKER_POLL_INTERVAL_SECONDS` | `600` | Billing calibration poll interval |
 | `DEFAULT_VOLUME_SIZE_GB`, `DEFAULT_DATA_CENTER`, … | see `controller/config.py` | Planning defaults |
 

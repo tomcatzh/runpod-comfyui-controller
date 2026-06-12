@@ -234,6 +234,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 result = self.service.resize_session_volume(match.group(1), payload)
                 self._send_json(result, status=200 if result.get("ok") else 409)
                 return
+            if match := re.fullmatch(r"/api/v1/volumes/([^/]+)/delete", path):
+                result = self.service.delete_warm_volume(match.group(1))
+                self._send_json(result, status=200 if result.get("ok") else 409)
+                return
             if match := re.fullmatch(r"/api/v1/sessions/([^/]+)/reclaim", path):
                 result = self.service.reclaim_session(match.group(1), payload)
                 self._send_json(result, status=200 if result.get("ok") else 409)

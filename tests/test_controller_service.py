@@ -59,6 +59,7 @@ def test_settings(root: Path) -> Settings:
         hydration_poll_interval_seconds=0,
         hydration_timeout_seconds=5,
         hydration_ttl_hours=24,
+        warm_volume_idle_ttl_hours=72,
         billing_worker_poll_interval_seconds=600,
         billing_worker_bucket_size="hour",
         billing_cpu_absent_grace_hours=24,
@@ -519,7 +520,8 @@ class ControllerServiceTest(unittest.TestCase):
         self.assertIn("Runtime model operations", models_html)
         self.assertIn("Grow volume", models_html)
         overview_html = session_detail(session).decode("utf-8")
-        self.assertIn("Shutdown: stop GPU + collect outputs", overview_html)
+        self.assertIn("Shutdown (keep warm volume)", overview_html)
+        self.assertIn("Shutdown + delete volume", overview_html)
         self.assertIn(f'/sessions/{request["session_id"]}/models', overview_html)
         self.assertIn(f'/sessions/{request["session_id"]}/outputs', overview_html)
         self.assertIn("Candidate Plan", overview_html)
@@ -2482,6 +2484,111 @@ class ControllerServiceTest(unittest.TestCase):
         after = service.get_session(session_id)
         self.assertEqual(after["state"], "reclaimed")
         self.assertEqual(after["missing_finalization_reason"], "cost_cap_reached")
+
+    def test_reclaim_keep_volume_marks_warm_and_next_session_reuses_it(self) -> None:
+        service = self.make_service()
+        uploaded = service.upload_comfyui_workflow(
+            {
+                "filename": "flow.json",
+                "content": json.dumps({"nodes": [{"id": 1, "type": "CheckpointLoaderSimple", "widgets_values": ["model.safetensors"]}]}),
+            }
+        )
+        asset = dict(uploaded["extracted_assets"][0])
+        asset.update({"url": "https://example.com/model.safetensors", "size_bytes": 2048, "size_unknown": False, "status": "ready"})
+        service.update_comfyui_workflow(uploaded["id"], {"extracted_assets": [asset]})
+        launch = {"product": "comfyui", "workflow_id": uploaded["id"], "data_centers": ["US-KS-2"]}
+
+        request = service.create_resource_request(launch)
+        session_id = request["session_id"]
+        volume_id = service.get_session(session_id)["network_volume_id"]
+        client = self.s3_output_client(session_id)
+        with (
+            patch("controller.service.has_s3_credentials", return_value=True),
+            patch("controller.service.RunpodS3VolumeClient", return_value=client),
+        ):
+            result = service.reclaim_session(session_id, {"force": True, "keep_volume": True})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["volume_kept_warm"])
+        volume = service.db.get("network_volumes", volume_id)
+        self.assertEqual(volume["retention_policy"], "warm")
+        self.assertNotEqual(volume["state"], "deleted")
+        self.assertTrue(volume["warm_expires_at"])
+        self.assertTrue(volume["warm_assets_key"])
+
+        sweep = service.reconcile_orphan_resources()
+        self.assertNotIn(volume_id, sweep.get("volumes_deleted") or [])
+        self.assertNotEqual(service.db.get("network_volumes", volume_id)["state"], "deleted")
+
+        second = service.create_resource_request(launch)
+        session2 = service.get_session(second["session_id"])
+        self.assertEqual(session2["state"], "interactive_ready")
+        self.assertEqual(session2["network_volume_id"], volume_id)
+        volume = service.db.get("network_volumes", volume_id)
+        self.assertEqual(volume["retention_policy"], "delete_after_collection")
+        events = json.dumps([e.get("event_type") for e in (session2.get("workflow") or {}).get("events") or []])
+        self.assertIn("warm_volume_reused", events)
+
+        client2 = self.s3_output_client(second["session_id"])
+        with (
+            patch("controller.service.has_s3_credentials", return_value=True),
+            patch("controller.service.RunpodS3VolumeClient", return_value=client2),
+        ):
+            final = service.reclaim_session(second["session_id"], {"force": True})
+        self.assertTrue(final["ok"])
+        self.assertFalse(final.get("volume_kept_warm"))
+        self.assertEqual(service.db.get("network_volumes", volume_id)["state"], "deleted")
+
+    def test_watchdog_cost_cap_reclaim_keeps_volume_warm(self) -> None:
+        service = self.make_service()
+        request = service.create_resource_request({"product": "comfyui"})
+        session_id = request["session_id"]
+        session = service.get_session(session_id)
+        volume_id = session["network_volume_id"]
+        service.db.update("pods", session["gpu_pod_id"], {"cost_per_hr": 60.0, "created_at": "2026-01-01T00:00:00+00:00"})
+        service.db.update("sessions", session_id, {"max_total_usd": 5.0})
+        client = self.s3_output_client(session_id)
+        with (
+            patch("controller.service.has_s3_credentials", return_value=True),
+            patch("controller.service.RunpodS3VolumeClient", return_value=client),
+        ):
+            tick = service.watchdog_tick(session_id, {"queue_active": True, "output_active": True})
+        self.assertEqual(tick["reason"], "cost_cap_reached")
+        self.assertEqual(service.get_session(session_id)["state"], "reclaimed")
+        volume = service.db.get("network_volumes", volume_id)
+        self.assertEqual(volume["retention_policy"], "warm")
+        self.assertNotEqual(volume["state"], "deleted")
+
+    def test_warm_volume_expiry_sweep_and_manual_delete(self) -> None:
+        service = self.make_service()
+        request = service.create_resource_request({"product": "comfyui"})
+        session_id = request["session_id"]
+        volume_id = service.get_session(session_id)["network_volume_id"]
+        # A non-warm volume must not be deletable through the warm endpoint.
+        rejected = service.delete_warm_volume(volume_id)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(rejected["error"], "volume_not_warm")
+        client = self.s3_output_client(session_id)
+        with (
+            patch("controller.service.has_s3_credentials", return_value=True),
+            patch("controller.service.RunpodS3VolumeClient", return_value=client),
+        ):
+            service.reclaim_session(session_id, {"force": True, "keep_volume": True})
+        service.db.update("network_volumes", volume_id, {"warm_expires_at": "2026-01-01T00:00:00+00:00"})
+        sweep = service.reconcile_orphan_resources()
+        self.assertIn(volume_id, sweep.get("volumes_deleted") or [])
+        self.assertEqual(service.db.get("network_volumes", volume_id)["state"], "deleted")
+
+        second = service.create_resource_request({"product": "comfyui"})
+        second_volume = service.get_session(second["session_id"])["network_volume_id"]
+        client2 = self.s3_output_client(second["session_id"])
+        with (
+            patch("controller.service.has_s3_credentials", return_value=True),
+            patch("controller.service.RunpodS3VolumeClient", return_value=client2),
+        ):
+            service.reclaim_session(second["session_id"], {"force": True, "keep_volume": True})
+        deleted = service.delete_warm_volume(second_volume)
+        self.assertTrue(deleted["ok"])
+        self.assertEqual(service.db.get("network_volumes", second_volume)["state"], "deleted")
 
     def test_watchdog_warns_when_spend_nears_cost_cap(self) -> None:
         service = self.make_service()
