@@ -1,4 +1,8 @@
+English | [简体中文](README.zh-CN.md)
+
 # RunPod ComfyUI Controller
+
+[![CI](https://github.com/tomcatzh/runpod-comfyui-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/tomcatzh/runpod-comfyui-controller/actions/workflows/ci.yml)
 
 A local-first session controller that runs interactive [ComfyUI](https://github.com/comfyanonymous/ComfyUI) on cheap [RunPod](https://www.runpod.io/) GPUs — with **money safety as a design constraint**, not an afterthought.
 

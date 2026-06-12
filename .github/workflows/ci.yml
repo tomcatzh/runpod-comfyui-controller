@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile
+        run: python -m compileall controller
+      - name: Test
+        run: python -m unittest discover -s tests -v 2>&1 | tail -20
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f Dockerfile.controller -t runpod-comfyui-controller:ci .
+      - name: Smoke test container
+        run: |
+          docker run -d --name ctl -e CONTROLLER_HOST=0.0.0.0 -p 8088:8088 runpod-comfyui-controller:ci
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8088/api/v1/capabilities >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8088/api/v1/capabilities >/dev/null
+          curl -fsS http://127.0.0.1:8088/ | grep -q "RunPod Controller"
+          docker rm -f ctl
