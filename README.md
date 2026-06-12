@@ -56,6 +56,8 @@ CIVITAI_TOKEN=...               # optional
 
 If the controller is already running, restart it after editing — the file is read at startup only.
 
+**SSH key — nothing to do.** On first start the controller generates an ed25519 keypair at `<data dir>/secrets/runpod-ssh-key`, registers the public key on your RunPod account, and injects it (together with the keys already registered on your account) into every pod it creates. If auto-registration fails, the startup log prints the public key — paste it into **Settings → SSH Public Keys** only if you also want to SSH into pods manually. An existing `runpodctl` key (`~/.runpod/ssh/runpodctl-ssh-key`) is reused; `RUNPOD_SSH_KEY_PATH` overrides the path.
+
 ## Quick start (Docker)
 
 ```bash
@@ -77,8 +79,9 @@ Open <http://localhost:8088>. The data directory defaults to `~/runpod-controlle
 ## Using it
 
 1. **Create ComfyUI** on the dashboard opens a five-step wizard: upload a workflow JSON → resolve custom nodes (Comfy Registry suggestions, locked to exact git commits) → fill model URLs (sizes fetched automatically; the volume is auto-sized) → optional CPU dependency probe → set budget and launch.
+   A prepared workflow can be **exported as a shareable package** (a zip with the workflow JSON plus locked nodes and model URLs, tokens stripped); importing the zip on another controller restores everything in one upload.
 2. The controller fans out across compatible datacenters: one network volume plus one cheap CPU pod each, downloading your models in parallel. Hydrated candidates then race for a GPU **serially** (only one paid GPU at a time); if environment configuration fails on one, the next hydrated candidate takes over.
-3. When the session is `interactive_ready`, open the ComfyUI URL and work normally. Outputs are mirrored to `<data dir>/artifacts/sessions/<id>/outputs/` every few minutes.
+3. When the session is `interactive_ready`, open the ComfyUI URL — **your workflow is already loaded on the canvas**, with model loader references rewritten to the files actually placed on the volume (so swapping a model URL in the library needs no manual edits in ComfyUI). Outputs are mirrored to `<data dir>/artifacts/sessions/<id>/outputs/` every few minutes.
 4. **Shutdown** stops the GPU first, runs a final output collection, and only then deletes the volume. If collection fails or finds nothing for a session that was interactive, the volume is retained for recovery — discarding it requires an explicit `discard_outputs` action.
 
 The UI is bilingual: it follows your browser language (English default, 中文 via `Accept-Language` or `?lang=zh`). All timestamps render in your local timezone; storage stays UTC.
@@ -91,6 +94,7 @@ Everything is environment-driven; the important ones:
 |---|---|---|
 | `CONTROLLER_DATA_DIR` | `~/runpod-controller` (`/data` in Docker) | Root for DB, artifacts, logs, secrets |
 | `CONTROLLER_SECRET_ENV_FILE` | `<data dir>/secrets/controller.env` | Credentials file loaded at startup |
+| `RUNPOD_SSH_KEY_PATH` | auto-generated `<data dir>/secrets/runpod-ssh-key` | Private key used to SSH into pods |
 | `CONTROLLER_HOST` / `CONTROLLER_PORT` | `127.0.0.1` / `8088` | Bind address and port |
 | `IDLE_SHUTDOWN_MINUTES` | `20` | Idle reclaim window (lease extensions push it out) |
 | `OUTPUT_COLLECTOR_INTERVAL_SECONDS` | `300` | Background output mirror interval |
@@ -106,7 +110,7 @@ Every UI action is a JSON API call (`GET /api/v1/capabilities` lists ~37 endpoin
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests   # 122 tests, no network, no paid resources
+python3 -m unittest discover -s tests   # 138 tests, no network, no paid resources
 ```
 
 Tests run against a fake provider adapter; live behavior (S3 quirks, template differences) is documented in `docs/runpod-controller-v1.md`.

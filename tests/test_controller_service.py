@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import datetime as dt
+import io
 import json
 import os
 import subprocess
+import zipfile
 import threading
 import time
 import tempfile
@@ -14,7 +17,13 @@ from unittest.mock import patch
 
 from controller.assets import canonical_asset_url, detect_provider, normalize_asset_manifest, redact_url
 from controller.asset_metadata import duplicate_url_keys, peek_url_metadata, normalized_url_key, volume_size_gb_for_assets
-from controller.comfyui_workflow import analyze_comfyui_workflow, extract_model_requirements, launch_template_fingerprint, workflow_hash
+from controller.comfyui_workflow import (
+    analyze_comfyui_workflow,
+    extract_model_requirements,
+    launch_template_fingerprint,
+    rewrite_workflow_model_references,
+    workflow_hash,
+)
 from controller.costing import enrich_pod_cost, enrich_volume_cost, network_volume_rate_usd_per_hr
 from controller.config import Settings, load_settings
 from controller.comfyui_registry import registry_node_to_custom_node
@@ -1131,6 +1140,141 @@ class ControllerServiceTest(unittest.TestCase):
         session = service.get_session(request["session_id"])
         self.assertEqual(session["workflow"]["comfyui_workflow_id"], resolved["id"])
         self.assertEqual(session["workflow"]["install_plan"]["steps"][0]["ref"], "a" * 40)
+
+    def test_rewrite_workflow_model_references_updates_widgets_and_duplicate_nodes(self) -> None:
+        workflow = {
+            "nodes": [
+                {"id": 1, "type": "CheckpointLoaderSimple", "widgets_values": ["old-model.safetensors"]},
+                {"id": 2, "type": "CheckpointLoaderSimple", "widgets_values": ["old-model.safetensors"]},
+                {"id": 3, "type": "LoraLoader", "widgets_values": ["style-lora.safetensors", 0.8]},
+            ]
+        }
+        assets = extract_model_requirements(workflow)
+        checkpoint = next(asset for asset in assets if asset["model_folder"] == "checkpoints")
+        checkpoint["filename"] = "swapped-model.safetensors"
+        checkpoint["target"] = "assets/comfyui/checkpoints/swapped-model.safetensors"
+        removed = next(asset for asset in assets if asset["model_folder"] == "loras")
+        removed = dict(removed, filename="ignored.safetensors", status="removed")
+        rewritten, changes = rewrite_workflow_model_references(workflow, [checkpoint, removed])
+        values = [node["widgets_values"][0] for node in rewritten["nodes"]]
+        self.assertEqual(values, ["swapped-model.safetensors", "swapped-model.safetensors", "style-lora.safetensors"])
+        self.assertEqual(len(changes), 2)
+        # The input workflow must stay untouched.
+        self.assertEqual(workflow["nodes"][0]["widgets_values"][0], "old-model.safetensors")
+
+    def test_launch_context_rewrites_model_references_for_session(self) -> None:
+        service = self.make_service()
+        uploaded = service.upload_comfyui_workflow(
+            {
+                "filename": "flow.json",
+                "content": json.dumps({"nodes": [{"id": 1, "type": "CheckpointLoaderSimple", "widgets_values": ["old.safetensors"]}]}),
+            }
+        )
+        self.assertEqual(uploaded["status"], "needs_model_urls")
+        asset = dict(uploaded["extracted_assets"][0])
+        asset.update(
+            {
+                "url": "https://example.com/models/new.safetensors",
+                "filename": "new.safetensors",
+                "target": "assets/comfyui/checkpoints/new.safetensors",
+                "size_bytes": 1024,
+                "size_unknown": False,
+                "status": "ready",
+            }
+        )
+        ready = service.update_comfyui_workflow(uploaded["id"], {"extracted_assets": [asset]})
+        self.assertEqual(ready["status"], "ready_to_probe")
+        request = service.create_resource_request({"product": "comfyui", "workflow_id": uploaded["id"]})
+        self.assertEqual(request["state"], "interactive_ready")
+        session = service.get_session(request["session_id"])
+        stored = json.dumps(session["workflow"]["ui_workflow"])
+        self.assertIn("new.safetensors", stored)
+        self.assertNotIn("old.safetensors", stored)
+        # The library copy keeps the original JSON; only the launch copy is rewritten.
+        library = service.get_comfyui_workflow(uploaded["id"])
+        self.assertIn("old.safetensors", json.dumps(library["workflow"]))
+
+    def test_workflow_package_export_import_round_trip(self) -> None:
+        service = self.make_service()
+        uploaded = service.upload_comfyui_workflow(
+            {
+                "filename": "flow.json",
+                "name": "Shared Flow",
+                "content": json.dumps(
+                    {
+                        "nodes": [
+                            {"id": 1, "type": "Fancy Custom Node (example)"},
+                            {"id": 2, "type": "CheckpointLoaderSimple", "widgets_values": ["model.safetensors"]},
+                        ]
+                    }
+                ),
+            }
+        )
+        service.resolve_comfyui_workflow_node(
+            uploaded["id"],
+            {
+                "decision": "install_git_repo",
+                "class_type": "Fancy Custom Node (example)",
+                "package": "example-custom-node",
+                "repo_url": "https://github.com/example/custom-node",
+                "locked_ref": "a" * 40,
+            },
+        )
+        asset = dict(service.get_comfyui_workflow(uploaded["id"])["extracted_assets"][0])
+        asset.update({"url": "https://example.com/model.safetensors?token=secret", "size_bytes": 2048, "size_unknown": False, "status": "ready"})
+        service.update_comfyui_workflow(uploaded["id"], {"extracted_assets": [asset]})
+
+        filename, blob = service.export_comfyui_workflow_package(uploaded["id"])
+        self.assertTrue(filename.endswith(".comfyui-pack.zip"))
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            packaged_workflow = json.loads(archive.read("workflow.json").decode("utf-8"))
+        self.assertEqual(manifest["format"], "comfyui-controller-workflow-package")
+        self.assertEqual(manifest["workflow_hash"], workflow_hash(packaged_workflow))
+        self.assertNotIn("token=secret", json.dumps(manifest))
+
+        tmp2 = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp2.cleanup)
+        settings2 = test_settings(Path(tmp2.name))
+        db2 = Database(settings2)
+        db2.initialize()
+        service2 = ControllerService(settings2, db2, TestRunpodAdapter(settings2))
+        imported = service2.import_comfyui_workflow_package({"package_base64": base64.b64encode(blob).decode("ascii")})
+        self.assertTrue(imported["imported"])
+        self.assertTrue(imported["package_hash_matched"])
+        self.assertEqual(imported["workflow_hash"], manifest["workflow_hash"])
+        self.assertEqual(imported["name"], "Shared Flow")
+        self.assertEqual(imported["node_locks"][0]["locked_ref"], "a" * 40)
+        self.assertEqual(imported["status"], "ready_to_probe")
+        self.assertEqual(imported["extracted_assets"][0]["size_bytes"], 2048)
+
+    def test_workflow_package_import_rejects_invalid_packages(self) -> None:
+        service = self.make_service()
+        with self.assertRaises(ValueError):
+            service.import_comfyui_workflow_package({"package_base64": "not-base64!!"})
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("workflow.json", "{}")
+        with self.assertRaises(ValueError):
+            service.import_comfyui_workflow_package({"package_base64": base64.b64encode(buffer.getvalue()).decode("ascii")})
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("workflow.json", "{}")
+            archive.writestr("manifest.json", json.dumps({"format": "something-else", "version": 1}))
+        with self.assertRaises(ValueError):
+            service.import_comfyui_workflow_package({"package_base64": base64.b64encode(buffer.getvalue()).decode("ascii")})
+
+    def test_environment_script_compiles_and_writes_session_workflow_autoload(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        settings = test_settings(Path(self.tmp.name))
+        script = RunpodRestAdapter(settings)._comfyui_environment_script()
+        compile(script, "<comfyui-environment-script>", "exec")
+        self.assertIn("def write_session_workflow", script)
+        self.assertIn("runpod-controller-session.json", script)
+        self.assertIn("runpod-controller-autoload", script)
+        self.assertIn("loadGraphData", script)
+        # The workflow must land on disk before ComfyUI restarts.
+        self.assertLess(script.index("session_workflow = write_session_workflow(root)"), script.index("restart_proc = restart_comfyui(root, output_dir)"))
 
     def test_workflow_dependency_probe_retries_datacenters_and_cleans_failed_volume(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -2859,7 +3003,7 @@ class ControllerServiceTest(unittest.TestCase):
         self.assertIn("New ComfyUI Session", wizard)
         self.assertIn("Workflow library", wizard)
         self.assertIn("Use selected workflow", wizard)
-        self.assertIn("Upload UI workflow JSON", wizard)
+        self.assertIn("Upload workflow JSON or shared package (.zip)", wizard)
         self.assertIn('document.getElementById("workflow-select").value = ""', wizard)
         self.assertIn('document.getElementById("workflow-name").value = ""', wizard)
         self.assertIn('document.getElementById("workflow-file").value = ""', wizard)

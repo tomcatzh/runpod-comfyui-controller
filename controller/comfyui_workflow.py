@@ -409,6 +409,102 @@ def extract_model_requirements(ui_workflow_json: Any, api_workflow_json: Any = N
     return sorted(rows.values(), key=lambda item: (item["model_folder"], item["filename"]))
 
 
+def rewrite_workflow_model_references(workflow_json: Any, assets: list[dict[str, Any]]) -> tuple[Any, list[dict[str, Any]]]:
+    """Return a copy of the UI workflow whose model widget values match the
+    assets that will actually be placed on the pod.
+
+    When the user swaps an asset URL after upload, the downloaded filename can
+    drift from what the workflow JSON references; without this rewrite the
+    session opens with loaders pointing at files that do not exist.
+    """
+    workflow = normalize_workflow_json(workflow_json)
+    if workflow is None or not assets:
+        return workflow, []
+    raw_nodes = _raw_workflow_nodes(workflow, "ui")
+    nodes_by_id: dict[str, Any] = {}
+    for _source, node_id, node in raw_nodes:
+        if isinstance(node, dict):
+            nodes_by_id.setdefault(str(node.get("id") or node_id or ""), node)
+    changes: list[dict[str, Any]] = []
+    replacements: dict[str, str] = {}
+    for asset in assets:
+        if asset.get("status") in {"removed", "replaced"}:
+            continue
+        if str(asset.get("source") or "ui") != "ui":
+            continue
+        desired = _asset_reference_value(asset)
+        node = nodes_by_id.get(str(asset.get("source_node_id") or ""))
+        field = str(asset.get("source_field") or "")
+        if not desired or node is None or not field:
+            continue
+        container, key = _resolve_field_path(node, field)
+        if container is None:
+            continue
+        current = container[key]
+        if not isinstance(current, str) or current.strip() == desired:
+            continue
+        container[key] = desired
+        replacements[current.strip()] = desired
+        changes.append({"node_id": str(asset.get("source_node_id")), "field": field, "from": current.strip(), "to": desired})
+    if replacements:
+        # Extraction dedupes assets by (folder, filename), so a model used by
+        # several nodes records only one source position; sweep the rest.
+        for _source, node_id, node in raw_nodes:
+            if not isinstance(node, dict):
+                continue
+            for field, value in _model_like_values_for_node(node, "ui"):
+                desired = replacements.get(value)
+                if desired is None or value == desired:
+                    continue
+                container, key = _resolve_field_path(node, field)
+                if container is None:
+                    continue
+                current = container[key]
+                if not isinstance(current, str) or current.strip() != value:
+                    continue
+                container[key] = desired
+                changes.append({"node_id": str(node.get("id") or node_id or ""), "field": field, "from": value, "to": desired})
+    return workflow, changes
+
+
+def _asset_reference_value(asset: dict[str, Any]) -> str:
+    # Loader widgets take paths relative to the model folder; the controller
+    # links assets at models/{folder}/{path-under-folder} from the target.
+    target = str(asset.get("target") or "").lstrip("/")
+    prefix = "assets/comfyui/"
+    if target.startswith(prefix):
+        rel = target[len(prefix):]
+        if "/" in rel:
+            return rel.split("/", 1)[1]
+    return str(asset.get("filename") or "").strip()
+
+
+_FIELD_PATH_TOKEN = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
+
+
+def _resolve_field_path(node: Any, path: str) -> tuple[Any, Any]:
+    tokens: list[Any] = []
+    for name, index in _FIELD_PATH_TOKEN.findall(path):
+        tokens.append(name if name else int(index))
+    if not tokens:
+        return None, None
+    current = node
+    for token in tokens[:-1]:
+        if isinstance(token, int):
+            if not isinstance(current, list) or token >= len(current):
+                return None, None
+        elif not isinstance(current, dict) or token not in current:
+            return None, None
+        current = current[token]
+    last = tokens[-1]
+    if isinstance(last, int):
+        if isinstance(current, list) and last < len(current):
+            return current, last
+    elif isinstance(current, dict) and last in current:
+        return current, last
+    return None, None
+
+
 def guess_model_folder(class_type: str, key_path: str, value: str) -> str:
     haystack = f"{class_type} {key_path} {value}".lower()
     for marker, folder in MODEL_FOLDER_BY_KEY:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import hashlib
+import io
 import math
 import os
 import pathlib
@@ -10,6 +12,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import zipfile
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +25,7 @@ from .comfyui_workflow import (
     launch_template_fingerprint,
     normalize_custom_nodes,
     normalize_workflow_json,
+    rewrite_workflow_model_references,
     workflow_hash,
     workflow_launch_fingerprint,
 )
@@ -540,6 +544,109 @@ class ControllerService:
             return {"ok": False, "id": workflow_id, "error": "workflow_in_use_by_active_session"}
         self.db.update("comfyui_workflows", workflow_id, self._deleted_workflow_values())
         return {"ok": True, "id": workflow_id}
+
+    WORKFLOW_PACKAGE_FORMAT = "comfyui-controller-workflow-package"
+    WORKFLOW_PACKAGE_VERSION = 1
+    WORKFLOW_PACKAGE_MEMBER_LIMIT = 64 * 1024 * 1024
+
+    def export_comfyui_workflow_package(self, workflow_id: str) -> tuple[str, bytes]:
+        """Bundle a workflow plus its resolved metadata into a shareable zip.
+
+        The package carries everything another controller needs to launch the
+        same session: the workflow JSON, locked custom nodes, and model URLs
+        with sizes. Asset URLs are stored redacted, so no tokens can leak.
+        """
+        workflow = self.get_comfyui_workflow(workflow_id)
+        if not workflow:
+            raise KeyError(workflow_id)
+        manifest = {
+            "format": self.WORKFLOW_PACKAGE_FORMAT,
+            "version": self.WORKFLOW_PACKAGE_VERSION,
+            "name": workflow.get("name"),
+            "workflow_hash": workflow.get("workflow_hash"),
+            "original_filename": workflow.get("original_filename"),
+            "exported_at": utc_iso(),
+            "node_locks": workflow.get("node_locks") or [],
+            "node_mappings": workflow.get("node_mappings") or {},
+            "extracted_assets": [self._shareable_asset(asset) for asset in workflow.get("extracted_assets") or []],
+            "extra_assets": [self._shareable_asset(asset) for asset in workflow.get("extra_assets") or []],
+        }
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("workflow.json", json_dumps(workflow.get("workflow")))
+            archive.writestr("manifest.json", json_dumps(manifest))
+        slug = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(workflow.get("name") or "workflow")).strip("-") or "workflow"
+        self.audit("comfyui_workflow", workflow_id, "exported", "ComfyUI workflow package exported", {"name": workflow.get("name")})
+        return f"{slug[:64]}.comfyui-pack.zip", buffer.getvalue()
+
+    def import_comfyui_workflow_package(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw = payload.get("package_base64") or payload.get("content_base64")
+        if not raw:
+            raise ValueError("package_base64 is required")
+        try:
+            data = base64.b64decode(str(raw), validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"invalid_package:base64_decode_failed:{type(exc).__name__}") from exc
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                names = set(archive.namelist())
+                if "workflow.json" not in names or "manifest.json" not in names:
+                    raise ValueError("invalid_package:missing_workflow_or_manifest")
+                for member in ("workflow.json", "manifest.json"):
+                    if archive.getinfo(member).file_size > self.WORKFLOW_PACKAGE_MEMBER_LIMIT:
+                        raise ValueError("invalid_package:member_too_large")
+                workflow_json = json_loads(archive.read("workflow.json").decode("utf-8"), None)
+                manifest = json_loads(archive.read("manifest.json").decode("utf-8"), None)
+        except zipfile.BadZipFile as exc:
+            raise ValueError("invalid_package:not_a_zip") from exc
+        if not isinstance(manifest, dict) or manifest.get("format") != self.WORKFLOW_PACKAGE_FORMAT:
+            raise ValueError("invalid_package:unknown_format")
+        try:
+            version = int(manifest.get("version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version < 1 or version > self.WORKFLOW_PACKAGE_VERSION:
+            raise ValueError(f"invalid_package:unsupported_version:{manifest.get('version')}")
+        if workflow_json is None:
+            raise ValueError("invalid_package:workflow_json_invalid")
+        hash_matched = workflow_hash(workflow_json) == str(manifest.get("workflow_hash") or "")
+        uploaded = self.upload_comfyui_workflow(
+            {
+                "content": workflow_json,
+                "name": payload.get("name") or manifest.get("name"),
+                "filename": manifest.get("original_filename") or payload.get("filename"),
+            }
+        )
+        updates: dict[str, Any] = {}
+        if manifest.get("node_locks"):
+            updates["node_locks"] = manifest.get("node_locks")
+        if manifest.get("node_mappings"):
+            updates["node_mappings"] = manifest.get("node_mappings")
+        # Asset positions reference the packaged workflow; apply them only when
+        # the manifest still matches the JSON it shipped with.
+        if hash_matched:
+            if manifest.get("extracted_assets") is not None:
+                updates["extracted_assets"] = manifest.get("extracted_assets")
+            if manifest.get("extra_assets"):
+                updates["extra_assets"] = manifest.get("extra_assets")
+        result = self.update_comfyui_workflow(uploaded["id"], updates) if updates else uploaded
+        self.audit(
+            "comfyui_workflow",
+            uploaded["id"],
+            "imported",
+            "ComfyUI workflow package imported",
+            {"name": result.get("name"), "hash_matched": hash_matched},
+        )
+        result = dict(result)
+        result["imported"] = True
+        result["package_hash_matched"] = hash_matched
+        return result
+
+    def _shareable_asset(self, asset: dict[str, Any]) -> dict[str, Any]:
+        row = {key: value for key, value in asset.items() if key not in {"cache_hit"}}
+        if row.get("url"):
+            row["url"] = redact_url(canonical_asset_url(str(row["url"])))
+        return row
 
     def analyze_saved_comfyui_workflow(self, workflow_id: str) -> dict[str, Any]:
         workflow = self.get_comfyui_workflow(workflow_id)
@@ -1605,12 +1712,24 @@ class ControllerService:
                 raise ValueError("dependency_probe_failed:" + str(probe.get("error") or "unknown"))
             if request_id:
                 self.db.update("resource_requests", request_id, {"state": "dependency_probe_passed", "result_json": json_dumps({"probe": probe}), "updated_at": utc_iso()})
+            ui_workflow, reference_rewrites = rewrite_workflow_model_references(
+                workflow.get("workflow"),
+                self._workflow_launch_assets(workflow, include_incomplete=True),
+            )
+            if reference_rewrites:
+                self.audit(
+                    "comfyui_workflow",
+                    workflow_id,
+                    "model_references_rewritten",
+                    "Workflow model references rewritten to match resolved assets",
+                    {"changes": reference_rewrites},
+                )
             return {
                 "launch_template_id": None,
                 "comfyui_workflow_id": workflow_id,
                 "dependency_fingerprint": workflow.get("dependency_fingerprint"),
                 "launch_fingerprint": workflow.get("launch_fingerprint"),
-                "ui_workflow": workflow.get("workflow"),
+                "ui_workflow": ui_workflow,
                 "api_workflow": None,
                 "analyzer_result": analysis,
                 "probe_id": probe.get("id") or (probe.get("probe") or {}).get("id"),

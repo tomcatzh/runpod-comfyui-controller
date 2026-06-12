@@ -15,6 +15,7 @@ from typing import Any
 
 from .config import Settings
 from .gpu_catalog import gpu_type_meets_intent, normalize_gpu_vendor, normalize_min_vram_gb, select_comfyui_gpu_type
+from .ssh_keys import normalize_public_key, public_key_for, resolve_private_key_path
 
 
 REST_BASE = "https://rest.runpod.io/v1"
@@ -111,6 +112,9 @@ class RunpodAdapter:
     def billing_network_volumes(self, *, start_time: str, end_time: str, bucket_size: str = "hour") -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    def ensure_ssh_public_key_registered(self, public_key: str) -> dict[str, Any]:
+        return {"ok": True, "state": "not_supported"}
+
 
 class RunpodRestAdapter(RunpodAdapter):
     def __init__(self, settings: Settings):
@@ -148,10 +152,71 @@ class RunpodRestAdapter(RunpodAdapter):
             raise RuntimeError("RUNPOD_API_KEY is required for RunPod GraphQL")
         url = f"https://api.runpod.io/graphql?api_key={urllib.parse.quote(self.api_key)}"
         data = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        headers = {"Content-Type": "application/json", "User-Agent": "runpod-comfyui-controller/1.0"}
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             return json.loads(raw.decode("utf-8")) if raw else {}
+
+    def _account_public_keys(self) -> list[str]:
+        cached = getattr(self, "_account_keys_cache", None)
+        now = time.time()
+        if cached and now - cached[0] < 3600:
+            return list(cached[1])
+        try:
+            payload = self._graphql("query { myself { pubKey } }", timeout=15)
+            raw = str(((payload.get("data") or {}).get("myself") or {}).get("pubKey") or "")
+        except Exception:  # noqa: BLE001 - account keys are a nice-to-have
+            return list(cached[1]) if cached else []
+        keys = [line.strip() for line in raw.splitlines() if len(line.split()) >= 2]
+        self._account_keys_cache = (now, keys)
+        return list(keys)
+
+    def _env_with_public_key(self, env: dict[str, str]) -> dict[str, str]:
+        # RunPod base images append $PUBLIC_KEY to authorized_keys at boot.
+        # Live test 2026-06-12: when the create body sets PUBLIC_KEY, RunPod no
+        # longer injects the account-registered keys, so merge those in too --
+        # otherwise the controller key alone would lock out manual SSH.
+        try:
+            controller_key = public_key_for(resolve_private_key_path(self.settings)).strip()
+        except OSError:
+            controller_key = ""
+        lines = [line.strip() for line in str(env.get("PUBLIC_KEY") or "").splitlines() if line.strip()]
+        seen = {normalize_public_key(line) for line in lines}
+        for key in [*self._account_public_keys(), controller_key]:
+            normalized = normalize_public_key(key)
+            if normalized and normalized not in seen:
+                lines.append(key)
+                seen.add(normalized)
+        if not lines:
+            return env
+        return {**env, "PUBLIC_KEY": "\n".join(lines)}
+
+    def ensure_ssh_public_key_registered(self, public_key: str) -> dict[str, Any]:
+        normalized = normalize_public_key(public_key)
+        if not normalized:
+            return {"ok": False, "reason": "no_public_key"}
+        try:
+            payload = self._graphql("query { myself { id pubKey } }")
+        except Exception as exc:  # noqa: BLE001 - best-effort, never blocks startup
+            return {"ok": False, "reason": "account_keys_unreadable", "error": repr(exc)[:300]}
+        if payload.get("errors"):
+            return {"ok": False, "reason": "account_keys_unreadable", "error": str(payload["errors"])[:300]}
+        myself = (payload.get("data") or {}).get("myself") or {}
+        existing = str(myself.get("pubKey") or "")
+        if normalized in {normalize_public_key(line) for line in existing.splitlines()}:
+            return {"ok": True, "state": "already_registered"}
+        merged = f"{existing.strip()}\n\n{public_key.strip()}".strip()
+        try:
+            result = self._graphql(
+                "mutation($input: UpdateUserSettingsInput) { updateUserSettings(input: $input) { id } }",
+                {"input": {"pubKey": merged}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": "register_failed", "error": repr(exc)[:300]}
+        if result.get("errors"):
+            return {"ok": False, "reason": "register_failed", "error": str(result["errors"])[:300]}
+        return {"ok": True, "state": "registered"}
 
     def scout_gpu_matrix(self, intent: dict[str, Any]) -> dict[str, Any]:
         data_centers = [str(item) for item in (intent.get("data_centers") or []) if str(item).strip()]
@@ -911,7 +976,7 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
             "interruptible": False,
             "supportPublicIp": True,
             "ports": [f"{self.settings.comfyui_remote_port}/http", f"{self.settings.ssh_remote_port}/tcp"],
-            "env": env,
+            "env": self._env_with_public_key(env),
         }
         if self.settings.gpu_template_id:
             body["templateId"] = self.settings.gpu_template_id
@@ -949,7 +1014,7 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
             return mapping
         public_ip = str(mapping["public_ip"])
         ssh_port = mapping["ssh_port"]
-        key_path = os.environ.get("RUNPOD_SSH_KEY_PATH") or os.path.expanduser("~/.runpod/ssh/runpodctl-ssh-key")
+        key_path = str(resolve_private_key_path(self.settings))
         if not os.path.exists(key_path):
             return {"ok": False, "reason": "ssh_key_missing", "key_path": key_path, "provider_pod_id": provider_pod_id}
         ready = self._wait_for_ssh_ready(provider_pod_id=provider_pod_id, public_ip=public_ip, ssh_port=ssh_port, key_path=key_path)
@@ -1008,7 +1073,7 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
             return mapping
         public_ip = str(mapping["public_ip"])
         ssh_port = mapping["ssh_port"]
-        key_path = os.environ.get("RUNPOD_SSH_KEY_PATH") or os.path.expanduser("~/.runpod/ssh/runpodctl-ssh-key")
+        key_path = str(resolve_private_key_path(self.settings))
         if not os.path.exists(key_path):
             return {"ok": False, "reason": "ssh_key_missing", "key_path": key_path, "provider_pod_id": provider_pod_id}
         ready = self._wait_for_ssh_ready(provider_pod_id=provider_pod_id, public_ip=public_ip, ssh_port=ssh_port, key_path=key_path)
@@ -1483,8 +1548,52 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
             validation_plan = payload.get("validation_plan") or {}
             custom_nodes = payload.get("custom_nodes") or []
             api_workflow = payload.get("api_workflow")
+            ui_workflow = payload.get("ui_workflow")
             session_id = payload.get("session_id") or ""
             port = int(payload.get("comfyui_port") or 8188)
+
+            def write_session_workflow(root):
+                if not isinstance(ui_workflow, (dict, list)):
+                    return {"written": False, "reason": "no_ui_workflow"}
+                result = {"written": True}
+                try:
+                    workflows_dir = root / "user" / "default" / "workflows"
+                    workflows_dir.mkdir(parents=True, exist_ok=True)
+                    wf_path = workflows_dir / "runpod-controller-session.json"
+                    wf_path.write_text(json.dumps(ui_workflow, indent=2), encoding="utf-8")
+                    result["workflow_path"] = str(wf_path)
+                except Exception as exc:
+                    result["workflow_error"] = repr(exc)
+                try:
+                    ext_dir = root / "custom_nodes" / "runpod-controller-autoload"
+                    web_dir = ext_dir / "web"
+                    web_dir.mkdir(parents=True, exist_ok=True)
+                    (ext_dir / "__init__.py").write_text(
+                        'NODE_CLASS_MAPPINGS = {}\nNODE_DISPLAY_NAME_MAPPINGS = {}\nWEB_DIRECTORY = "./web"\n',
+                        encoding="utf-8",
+                    )
+                    js = (
+                        'import { app } from "../../scripts/app.js";\n\n'
+                        "const WORKFLOW = " + json.dumps(ui_workflow) + ";\n"
+                        "const KEY = " + json.dumps("runpod-controller-autoload:" + session_id) + ";\n\n"
+                        "app.registerExtension({\n"
+                        '  name: "runpod_controller.autoload",\n'
+                        "  async setup() {\n"
+                        "    try {\n"
+                        "      if (localStorage.getItem(KEY)) return;\n"
+                        '      localStorage.setItem(KEY, "1");\n'
+                        "      await app.loadGraphData(WORKFLOW);\n"
+                        "    } catch (err) {\n"
+                        '      console.warn("runpod-controller autoload failed", err);\n'
+                        "    }\n"
+                        "  },\n"
+                        "});\n"
+                    )
+                    (web_dir / "autoload.js").write_text(js, encoding="utf-8")
+                    result["autoload_path"] = str(web_dir / "autoload.js")
+                except Exception as exc:
+                    result["autoload_error"] = repr(exc)
+                return result
 
             def find_comfyui_root():
                 candidates = [
@@ -1810,6 +1919,9 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
                     dest.symlink_to(source)
                     linked.append(str(dest))
             runs.mkdir(parents=True, exist_ok=True)
+            # Best-effort: saved into the workflow sidebar plus a tiny frontend
+            # extension that opens the session workflow on first visit.
+            session_workflow = write_session_workflow(root)
             core_rels = [model_rel(asset) for asset in assets]
             visible_before = []
             custom_before = custom_nodes_visible()
@@ -1831,6 +1943,7 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
                 "linked": linked,
                 "custom_node_install": install_result,
                 "custom_nodes": custom_nodes,
+                "session_workflow": session_workflow,
             }
             (runs / "pod-info.json").write_text(json.dumps(pod_info, indent=2) + "\n", encoding="utf-8")
             missing_visible_models = [rel for rel in core_rels if rel not in visible_after]
@@ -1873,6 +1986,7 @@ runpodctl stop pod "$RUNPOD_POD_ID" || sleep 30
                 "visible_before": visible_before,
                 "visible_after": visible_after,
                 "restarted": restarted,
+                "session_workflow": session_workflow,
             }))
             '''
         )

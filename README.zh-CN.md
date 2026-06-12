@@ -56,6 +56,8 @@ CIVITAI_TOKEN=...               # 可选
 
 如果控制器已在运行，改完要重启——该文件只在启动时读取。
 
+**SSH key——无需任何操作。** 首次启动时控制器会在 `<数据目录>/secrets/runpod-ssh-key` 生成一对 ed25519 密钥，自动把公钥注册到你的 RunPod 账号，并在创建每个 Pod 时（连同你账号里已注册的公钥一起）注入进去。如果自动注册失败，启动日志会打印公钥——只有当你还想手动 SSH 进 Pod 时才需要把它粘贴到 **Settings → SSH Public Keys**。已有的 `runpodctl` 密钥（`~/.runpod/ssh/runpodctl-ssh-key`）会被直接复用；`RUNPOD_SSH_KEY_PATH` 可覆盖路径。
+
 ## 快速开始（Docker）
 
 ```bash
@@ -77,8 +79,9 @@ python3 -m controller.server
 ## 使用流程
 
 1. 在 Dashboard 点 **Create ComfyUI**，进入五步向导：上传工作流 JSON → 解析自定义节点（Comfy Registry 建议，锁定到精确 git 提交）→ 填模型链接（自动抓取大小、自动计算卷容量）→ 可选的 CPU 依赖探测 → 设置预算并启动。
+   配置好的工作流可以**导出为分享包**（zip 内含工作流 JSON、锁定的节点和模型链接，token 已剥离）；在另一台控制器上导入该 zip，一次上传即可恢复全部配置。
 2. 控制器在兼容机房间展开：每个机房一个网络卷加一个廉价 CPU Pod，并行下载你的模型。预下载完成的候选**串行**抢 GPU（同一时刻只有一台付费 GPU）；某个候选环境配置失败时，下一个已就绪的候选自动接棒。
-3. 会话到达 `interactive_ready` 后，打开 ComfyUI 地址正常使用。输出每几分钟镜像到 `<数据目录>/artifacts/sessions/<id>/outputs/`。
+3. 会话到达 `interactive_ready` 后，打开 ComfyUI 地址——**画布上已经载入你的工作流**，且模型加载节点的引用已被改写为卷上实际存在的文件（在库里换模型链接后无需再到 ComfyUI 里手改文件名）。输出每几分钟镜像到 `<数据目录>/artifacts/sessions/<id>/outputs/`。
 4. **关闭**会先停 GPU，再做最终输出采集，之后才删除卷。如果采集失败、或一个交互过的会话没采到任何输出，卷会被保留以便恢复——丢弃它需要显式的 `discard_outputs` 操作。
 
 界面是双语的：跟随浏览器语言（默认英文，中文通过 `Accept-Language` 或 `?lang=zh`）。所有时间按你的本地时区显示；存储保持 UTC。
@@ -91,6 +94,7 @@ python3 -m controller.server
 |---|---|---|
 | `CONTROLLER_DATA_DIR` | `~/runpod-controller`（Docker 内为 `/data`） | DB、产物、日志、密钥的根目录 |
 | `CONTROLLER_SECRET_ENV_FILE` | `<数据目录>/secrets/controller.env` | 启动时加载的凭据文件 |
+| `RUNPOD_SSH_KEY_PATH` | 自动生成于 `<数据目录>/secrets/runpod-ssh-key` | SSH 登录 Pod 用的私钥 |
 | `CONTROLLER_HOST` / `CONTROLLER_PORT` | `127.0.0.1` / `8088` | 监听地址与端口 |
 | `IDLE_SHUTDOWN_MINUTES` | `20` | 空闲回收窗口（续租可推后） |
 | `OUTPUT_COLLECTOR_INTERVAL_SECONDS` | `300` | 后台输出镜像间隔 |
@@ -106,7 +110,7 @@ python3 -m controller.server
 ## 开发
 
 ```bash
-python3 -m unittest discover -s tests   # 122 个测试，无网络、不创建付费资源
+python3 -m unittest discover -s tests   # 138 个测试，无网络、不创建付费资源
 ```
 
 测试基于假供应商适配器运行；真实环境行为（S3 实现的怪癖、模板差异）记录在 `docs/runpod-controller-v1.md`。

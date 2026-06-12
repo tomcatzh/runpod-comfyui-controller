@@ -416,15 +416,16 @@ def comfyui_new_page() -> bytes:
             <div class="row-actions workflow-library-actions">
               <button type="button" id="workflow-use" class="primary">{t("Use selected workflow")}</button>
               <button type="button" id="workflow-reanalyze">{t("Re-analyze")}</button>
+              <button type="button" id="workflow-export">{t("Export package")}</button>
               <button type="button" id="copy-missing-nodes">{t("Copy missing-node summary")}</button>
               <button type="button" id="workflow-delete" class="danger">{t("Delete")}</button>
             </div>
           </div>
         </div>
         <div class="form-row wide">
-          <label for="workflow-file">{t("Upload UI workflow JSON")}</label>
+          <label for="workflow-file">{t("Upload workflow JSON or shared package (.zip)")}</label>
           <div class="workflow-upload-row">
-            <input id="workflow-file" type="file" accept=".json,application/json">
+            <input id="workflow-file" type="file" accept=".json,.zip,application/json,application/zip">
             <button type="button" id="workflow-upload" class="primary">{t("Upload workflow")}</button>
           </div>
         </div>
@@ -1373,20 +1374,39 @@ def comfyui_new_script() -> str:
   document.getElementById("workflow-upload").addEventListener("click", async () => {
     const file = document.getElementById("workflow-file").files[0];
     if (!file) return setStatus("Choose a workflow JSON file first.", "error");
-    setStatus("Uploading workflow...", "busy");
+    const isPackage = /\.zip$/i.test(file.name);
+    setStatus(isPackage ? "Importing workflow package..." : "Uploading workflow...", "busy");
     try {
-      const content = await file.text();
-      const result = await api("/api/v1/comfyui/workflows/upload", {
-        method: "POST",
-        body: JSON.stringify({filename: file.name, name: document.getElementById("workflow-name").value.trim() || file.name, content})
-      });
+      let result;
+      if (isPackage) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        result = await api("/api/v1/comfyui/workflows/import", {
+          method: "POST",
+          body: JSON.stringify({filename: file.name, name: document.getElementById("workflow-name").value.trim() || undefined, package_base64: btoa(binary)})
+        });
+      } else {
+        const content = await file.text();
+        result = await api("/api/v1/comfyui/workflows/upload", {
+          method: "POST",
+          body: JSON.stringify({filename: file.name, name: document.getElementById("workflow-name").value.trim() || file.name, content})
+        });
+      }
       await loadWorkflows(result.id);
       await selectWorkflow(result.id);
-      setStatus("Workflow uploaded", "success");
+      setStatus(isPackage ? "Workflow package imported" : "Workflow uploaded", "success");
       goStep(nextStepForCurrentWorkflow());
     } catch (err) {
       setStatus(String(err.message || err), "error");
     }
+  });
+  document.getElementById("workflow-export").addEventListener("click", () => {
+    const selectedId = document.getElementById("workflow-select").value;
+    if (!selectedId) return setStatus("Select a workflow from the library first.", "error");
+    window.location.href = `/api/v1/comfyui/workflows/${encodeURIComponent(selectedId)}/export`;
+    setStatus("Workflow package downloading", "success");
   });
   document.getElementById("workflow-rename").addEventListener("click", async () => {
     if (!current) return;

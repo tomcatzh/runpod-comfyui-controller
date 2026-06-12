@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import Settings, load_settings
+from .ssh_keys import ensure_private_key
 from .db import Database
 from .i18n import detect_locale, set_locale
 from .runpod import build_adapter
@@ -84,6 +85,14 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 product = (query.get("product") or [None])[0]
                 self._send_json({"workflows": self.service.list_comfyui_workflows(product)})
+                return
+            if match := re.fullmatch(r"/api/v1/comfyui/workflows/([^/]+)/export", path):
+                try:
+                    filename, body = self.service.export_comfyui_workflow_package(match.group(1))
+                except KeyError:
+                    self._send_json({"error": "not_found"}, status=404)
+                    return
+                self._send_download(body, filename=filename)
                 return
             if match := re.fullmatch(r"/api/v1/comfyui/workflows/([^/]+)", path):
                 row = self.service.get_comfyui_workflow(match.group(1))
@@ -163,6 +172,12 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/v1/comfyui/workflows/upload":
                 self._send_json(self.service.upload_comfyui_workflow(payload), status=201)
+                return
+            if path == "/api/v1/comfyui/workflows/import":
+                try:
+                    self._send_json(self.service.import_comfyui_workflow_package(payload), status=201)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
                 return
             if match := re.fullmatch(r"/api/v1/comfyui/workflows/([^/]+)/analyze", path):
                 self._send_json(self.service.analyze_saved_comfyui_workflow(match.group(1)))
@@ -311,6 +326,14 @@ class ControllerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_download(self, body: bytes, *, filename: str, content_type: str = "application/zip") -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_html(self, body: bytes, *, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -330,6 +353,7 @@ def build_service(settings: Settings | None = None) -> ControllerService:
 def run() -> None:
     settings = load_settings()
     service = build_service(settings)
+    _ensure_ssh_access(service, settings)
     _start_orphan_sweep(service)
     _start_watchdog_loop(service, settings)
     _start_output_collector_loop(service, settings)
@@ -338,6 +362,37 @@ def run() -> None:
     server = ThreadingHTTPServer((settings.host, settings.port), ControllerHandler)
     print(f"RunPod controller listening on http://{settings.host}:{settings.port}", flush=True)
     server.serve_forever()
+
+
+def _ensure_ssh_access(service: ControllerService, settings: Settings) -> None:
+    """Make sure pod SSH works in a fresh environment: generate a keypair on
+    first start and best-effort register the public key on the RunPod account."""
+    try:
+        info = ensure_private_key(settings)
+    except Exception as exc:  # noqa: BLE001 - never block startup
+        print(f"[ssh] key check failed: {exc!r}", flush=True)
+        return
+    if not info.get("ok"):
+        print(f"[ssh] could not generate an SSH key ({info.get('error') or info.get('reason')}); "
+              f"pod environment configuration will fail until a key exists at {info.get('key_path')}", flush=True)
+        return
+    if info.get("generated"):
+        print(f"[ssh] generated controller SSH key at {info['key_path']}", flush=True)
+    public_key = str(info.get("public_key") or "").strip()
+    if not public_key:
+        print(f"[ssh] no public key next to {info.get('key_path')}; pods may reject SSH", flush=True)
+        return
+    try:
+        result = service.adapter.ensure_ssh_public_key_registered(public_key)
+    except Exception as exc:  # noqa: BLE001
+        result = {"ok": False, "reason": "register_error", "error": repr(exc)[:300]}
+    if result.get("ok"):
+        print(f"[ssh] public key {result.get('state')} on the RunPod account (key: {info['key_path']})", flush=True)
+    else:
+        print("[ssh] could not auto-register the public key on the RunPod account "
+              f"({result.get('reason')}: {result.get('error', '')}). Pods created by this controller still "
+              "receive it via the PUBLIC_KEY env var; to also SSH in manually, paste this line into "
+              "RunPod Settings -> SSH Public Keys:\n" + public_key, flush=True)
 
 
 def _start_orphan_sweep(service: ControllerService) -> None:
