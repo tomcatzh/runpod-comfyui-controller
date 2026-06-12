@@ -111,12 +111,12 @@ There is intentionally **no time-based hard cap**: spend is bounded by each sess
 
 ## API
 
-Every UI action is a JSON API call (`GET /api/v1/capabilities` lists ~37 endpoints): upload/analyze/probe workflows, dry-run planning, session lifecycle, runtime model downloads and moves onto a running pod, grow-only volume resize, output collection, and billing sync. `skills/runpod-controller/SKILL.md` documents the flow for LLM agents driving the controller without ever touching provider credentials.
+Every UI action is a JSON API call (`GET /api/v1/capabilities` lists ~37 endpoints): upload/analyze/probe workflows, dry-run planning, session lifecycle, runtime model downloads and moves onto a running pod, grow-only volume resize, output collection, and billing sync. `skills/runpod-controller/SKILL.md` documents the flow for LLM agents driving the controller without ever touching provider credentials, and `skills/comfyui-proxy-api/` wraps a running session's ComfyUI API (queue prompts, poll results, list models) with the browser headers RunPod's Cloudflare proxy requires for POSTs.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests   # 138 tests, no network, no paid resources
+python3 -m unittest discover -s tests   # 142 tests, no network, no paid resources
 ```
 
 Tests run against a fake provider adapter; live behavior (S3 quirks, template differences) is documented in `docs/runpod-controller-v1.md`.
