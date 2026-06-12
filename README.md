@@ -56,7 +56,13 @@ CIVITAI_TOKEN=...               # optional
 
 If the controller is already running, restart it after editing — the file is read at startup only.
 
-**SSH key — nothing to do.** On first start the controller generates an ed25519 keypair at `<data dir>/secrets/runpod-ssh-key`, registers the public key on your RunPod account, and injects it (together with the keys already registered on your account) into every pod it creates. If auto-registration fails, the startup log prints the public key — paste it into **Settings → SSH Public Keys** only if you also want to SSH into pods manually. An existing `runpodctl` key (`~/.runpod/ssh/runpodctl-ssh-key`) is reused; `RUNPOD_SSH_KEY_PATH` overrides the path.
+**SSH key — usually nothing to do.** The controller needs an SSH key to configure pods, and picks one in this order:
+
+1. **Bring your own**: set `RUNPOD_SSH_KEY_PATH` to your private key (the matching `.pub` must sit next to it).
+2. **Existing `runpodctl` key**: `~/.runpod/ssh/runpodctl-ssh-key` is reused automatically if present — long-time RunPod users keep working with the key already registered on their account.
+3. **Auto-generate**: otherwise, first start creates an ed25519 keypair at `<data dir>/secrets/runpod-ssh-key` and best-effort registers the public key on your RunPod account (if registration fails, the startup log prints the key; paste it into **Settings → SSH Public Keys** only if you also want manual SSH).
+
+Either way, the controller injects the key into every pod it creates and **merges in the public keys already registered on your account** — RunPod skips its own account-key injection when a pod sets `PUBLIC_KEY` explicitly, so without the merge your personal key would be locked out of controller-created pods.
 
 ## Quick start (Docker)
 

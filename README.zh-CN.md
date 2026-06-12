@@ -56,7 +56,13 @@ CIVITAI_TOKEN=...               # 可选
 
 如果控制器已在运行，改完要重启——该文件只在启动时读取。
 
-**SSH key——无需任何操作。** 首次启动时控制器会在 `<数据目录>/secrets/runpod-ssh-key` 生成一对 ed25519 密钥，自动把公钥注册到你的 RunPod 账号，并在创建每个 Pod 时（连同你账号里已注册的公钥一起）注入进去。如果自动注册失败，启动日志会打印公钥——只有当你还想手动 SSH 进 Pod 时才需要把它粘贴到 **Settings → SSH Public Keys**。已有的 `runpodctl` 密钥（`~/.runpod/ssh/runpodctl-ssh-key`）会被直接复用；`RUNPOD_SSH_KEY_PATH` 可覆盖路径。
+**SSH key——通常无需任何操作。** 控制器需要一把 SSH key 来配置 Pod，按以下优先级选取：
+
+1. **用你自己的**：把 `RUNPOD_SSH_KEY_PATH` 指向你的私钥（旁边需有同名 `.pub`）。
+2. **已有的 `runpodctl` key**：`~/.runpod/ssh/runpodctl-ssh-key` 存在就自动复用——RunPod 老用户继续用账号上已注册的那把 key，零变化。
+3. **自动生成**：以上都没有时，首次启动在 `<数据目录>/secrets/runpod-ssh-key` 生成一对 ed25519 密钥，并尽力把公钥注册到你的 RunPod 账号（注册失败时启动日志会打印公钥；只有你还想手动 SSH 进 Pod 才需要把它粘贴到 **Settings → SSH Public Keys**）。
+
+无论哪种方式，控制器都会把 key 注入它创建的每个 Pod，并**合并你账号里已注册的全部公钥**——Pod 显式设置 `PUBLIC_KEY` 后 RunPod 就不再注入账号公钥，不做合并的话你个人的 key 会被锁在控制器创建的 Pod 门外。
 
 ## 快速开始（Docker）
 
