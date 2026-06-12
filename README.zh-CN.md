@@ -27,12 +27,38 @@
 - Docker（任意较新版本；已在 OrbStack/Docker Compose 验证），**或** 裸 Python ≥ 3.11
 - 可选：Hugging Face / Civitai 只读 token，用于下载需要授权的模型
 
-## 快速开始（Docker）
+## 注册与获取 key
+
+1. **注册 [RunPod](https://runpod.io?ref=ix73cnib) 账号**并充值。按秒计费、预付制——充 $10 就能用很久（一次完整的 2 小时 RTX 4090 会话、含 29 GB 模型预下载，约 $1.40）。
+2. **API key**：在控制台打开 **Settings → API Keys → Create API Key**，授予读**和**写权限。控制器用它创建/删除 Pod 和网络卷、读取账单记录。
+3. **S3 API key**：打开 **Settings → S3 API Keys** 创建一对。把 access key ID 和 secret 都记下来——它们用于认证兼容 S3 的网络卷 API，负责下载校验和输出采集。
+4. 可选：只读的 [Hugging Face](https://huggingface.co/settings/tokens) 和/或 [Civitai](https://civitai.com/user/account) token，只有工作流要拉取需授权的模型时才需要。
+
+## 配置 key
+
+所有凭据放在一个 env 文件里，启动时加载一次（下载 token 只注入到临时 Pod 载荷中——agent 和界面都接触不到它们）：
 
 ```bash
 mkdir -p ~/runpod-controller/secrets
 cp controller.env.example ~/runpod-controller/secrets/controller.env
-# 填入 RUNPOD_API_KEY 和 S3 key 对，然后：
+chmod 600 ~/runpod-controller/secrets/controller.env
+```
+
+编辑该文件，填入上一步拿到的值：
+
+```ini
+RUNPOD_API_KEY=...              # Settings → API Keys
+RUNPODS3_ACCESS_KEY_ID=...      # Settings → S3 API Keys
+RUNPODS3_SECRET_ACCESS_KEY=...
+HF_TOKEN=...                    # 可选
+CIVITAI_TOKEN=...               # 可选
+```
+
+如果控制器已在运行，改完要重启——该文件只在启动时读取。
+
+## 快速开始（Docker）
+
+```bash
 docker compose up --build -d
 ```
 
@@ -43,9 +69,6 @@ docker compose up --build -d
 无需安装任何依赖：
 
 ```bash
-mkdir -p ~/runpod-controller/secrets
-cp controller.env.example ~/runpod-controller/secrets/controller.env
-# 填入密钥，然后：
 python3 -m controller.server
 ```
 

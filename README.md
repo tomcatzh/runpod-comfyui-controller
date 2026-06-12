@@ -27,12 +27,38 @@ Running ComfyUI on rented GPUs usually means either a SaaS subscription or hand-
 - Docker (any recent version; tested with OrbStack/Docker Compose), **or** bare Python ≥ 3.11
 - Optional: Hugging Face / Civitai read tokens for gated model downloads
 
-## Quick start (Docker)
+## Sign up and get your keys
+
+1. **Create a [RunPod](https://runpod.io?ref=ix73cnib) account** and add some credit. Billing is prepaid and per-second — $10 goes a long way (a full 2-hour RTX 4090 session with 29 GB of model pre-downloads costs about $1.40).
+2. **API key**: in the console, open **Settings → API Keys → Create API Key** and grant read **and** write permission. The controller uses it to create and delete pods and network volumes and to read billing records.
+3. **S3 API key**: open **Settings → S3 API Keys** and create one. Save both the access key ID and the secret — they authenticate the S3-compatible network-volume API used for download verification and output collection.
+4. Optional: read-only [Hugging Face](https://huggingface.co/settings/tokens) and/or [Civitai](https://civitai.com/user/account) tokens, only needed if your workflows pull gated models.
+
+## Configure the keys
+
+All credentials live in one env file, loaded once at startup (download tokens are injected only into transient pod payloads — agents and the UI never see them):
 
 ```bash
 mkdir -p ~/runpod-controller/secrets
 cp controller.env.example ~/runpod-controller/secrets/controller.env
-# fill in RUNPOD_API_KEY and the S3 key pair, then:
+chmod 600 ~/runpod-controller/secrets/controller.env
+```
+
+Edit the file and fill in the values from the previous step:
+
+```ini
+RUNPOD_API_KEY=...              # Settings → API Keys
+RUNPODS3_ACCESS_KEY_ID=...      # Settings → S3 API Keys
+RUNPODS3_SECRET_ACCESS_KEY=...
+HF_TOKEN=...                    # optional
+CIVITAI_TOKEN=...               # optional
+```
+
+If the controller is already running, restart it after editing — the file is read at startup only.
+
+## Quick start (Docker)
+
+```bash
 docker compose up --build -d
 ```
 
@@ -43,9 +69,6 @@ Open <http://localhost:8088>. State persists under `~/runpod-controller` (overri
 No dependencies to install:
 
 ```bash
-mkdir -p ~/runpod-controller/secrets
-cp controller.env.example ~/runpod-controller/secrets/controller.env
-# fill in the keys, then:
 python3 -m controller.server
 ```
 
