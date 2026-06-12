@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+ARG TARGETARCH
+
+ENV PYTHONUNBUFFERED=1 \
+    CONTROLLER_DATA_DIR=/data \
+    CONTROLLER_HOST=0.0.0.0 \
+    CONTROLLER_PORT=8088 \
+    RUNPOD_MODE=live
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) runpodctl_arch="amd64" ;; \
+      arm64) runpodctl_arch="arm64" ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-${runpodctl_arch}" -o /usr/local/bin/runpodctl \
+    && chmod +x /usr/local/bin/runpodctl
+COPY controller /app/controller
+
+EXPOSE 8088
+CMD ["python", "-m", "controller"]

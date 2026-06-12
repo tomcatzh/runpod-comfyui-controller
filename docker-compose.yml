@@ -1,0 +1,35 @@
+services:
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    image: runpod-comfyui-controller:local
+    environment:
+      CONTROLLER_DATA_DIR: /data
+      CONTROLLER_HOST: 0.0.0.0
+      CONTROLLER_PORT: 8088
+      RUNPOD_MODE: ${RUNPOD_MODE:-live}
+      DEFAULT_DATA_CENTER: ${DEFAULT_DATA_CENTER:-US-KS-2}
+      DEFAULT_VOLUME_SIZE_GB: ${DEFAULT_VOLUME_SIZE_GB:-10}
+      WATCHDOG_POLL_INTERVAL_SECONDS: ${WATCHDOG_POLL_INTERVAL_SECONDS:-30}
+      BILLING_CPU_ABSENT_GRACE_HOURS: ${BILLING_CPU_ABSENT_GRACE_HOURS:-24}
+      IDLE_SHUTDOWN_MINUTES: ${IDLE_SHUTDOWN_MINUTES:-20}
+      RECLAIM_WARNING_MINUTES: ${RECLAIM_WARNING_MINUTES:-5}
+      TUNNEL_PORT_START: ${TUNNEL_PORT_START:-18180}
+      TUNNEL_PORT_END: ${TUNNEL_PORT_END:-18220}
+      TUNNEL_AUTO_RECOVER: ${TUNNEL_AUTO_RECOVER:-true}
+      LIVE_GPU_TYPE_ID: ${LIVE_GPU_TYPE_ID:-}
+      LIVE_GPU_PRICE_USD_PER_HR: ${LIVE_GPU_PRICE_USD_PER_HR:-0}
+      GPU_TEMPLATE_ID: ${GPU_TEMPLATE_ID:-}
+      GPU_POD_IMAGE: ${GPU_POD_IMAGE:-runpod/comfyui:latest}
+    env_file:
+      - path: ${RUNPOD_CONTROLLER_ENV_FILE:-${HOME}/runpod-controller/secrets/controller.env}
+        required: false
+    volumes:
+      - type: bind
+        source: ${RUNPOD_CONTROLLER_DATA_DIR:-${HOME}/runpod-controller}
+        target: /data
+    ports:
+      - "${RUNPOD_CONTROLLER_PORT:-8088}:8088"
+      - "127.0.0.1:${TUNNEL_PORT_START:-18180}-${TUNNEL_PORT_END:-18220}:${TUNNEL_PORT_START:-18180}-${TUNNEL_PORT_END:-18220}"
+    restart: unless-stopped

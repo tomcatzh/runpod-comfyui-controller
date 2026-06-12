@@ -1,0 +1,9 @@
+[project]
+name = "runpod-comfyui-controller"
+version = "0.1.0"
+description = "Local-first RunPod ComfyUI session controller with CPU hydration and GPU safety gating."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
