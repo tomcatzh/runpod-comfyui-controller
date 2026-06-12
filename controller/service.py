@@ -835,6 +835,13 @@ class ControllerService:
         public["assets"] = self._workflow_launch_assets(public, include_incomplete=True)
         public["ready_assets"] = self._workflow_launch_assets(public, include_incomplete=False)
         public["hash_prefix"] = str(public.get("workflow_hash") or "")[:12]
+        warm = self._find_warm_volume(public.get("ready_assets") or [], 0, None, claim=False)
+        public["warm_volume"] = {
+            "id": warm.get("id"),
+            "data_center_id": warm.get("data_center_id"),
+            "size_gb": warm.get("size_gb"),
+            "warm_expires_at": warm.get("warm_expires_at"),
+        } if warm else None
         if public.get("last_probe_id"):
             public["last_probe_result"] = self.get_comfyui_probe(str(public["last_probe_id"]))
         else:
@@ -4007,7 +4014,7 @@ class ControllerService:
             {"session_id": session_id, "warm_expires_at": expires, "size_gb": volume.get("size_gb"), "data_center_id": volume.get("data_center_id")},
         )
 
-    def _find_warm_volume(self, assets: list[dict[str, Any]], size_gb: int, data_centers: list[str], *, claim: bool) -> dict[str, Any] | None:
+    def _find_warm_volume(self, assets: list[dict[str, Any]], size_gb: int, data_centers: list[str] | None, *, claim: bool) -> dict[str, Any] | None:
         if not assets:
             return None
         key = self._launch_assets_key(assets)
@@ -4020,7 +4027,7 @@ class ControllerService:
             expires = parse_iso(volume.get("warm_expires_at"))
             if not expires or now >= expires:
                 continue
-            if str(volume.get("data_center_id")) not in data_centers:
+            if data_centers is not None and str(volume.get("data_center_id")) not in data_centers:
                 continue
             if int(volume.get("size_gb") or 0) < int(size_gb or 0):
                 continue

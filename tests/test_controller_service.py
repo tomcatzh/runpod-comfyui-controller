@@ -2523,6 +2523,9 @@ class ControllerServiceTest(unittest.TestCase):
         dry = service.dry_run_resource_request(launch)
         self.assertEqual((dry.get("warm_volume") or {}).get("id"), volume_id)
         self.assertEqual(service.db.get("network_volumes", volume_id)["retention_policy"], "warm")
+        # The workflow library surfaces the warm match for the wizard dropdown.
+        library_row = service.get_comfyui_workflow(uploaded["id"])
+        self.assertEqual((library_row.get("warm_volume") or {}).get("id"), volume_id)
 
         second = service.create_resource_request(launch)
         session2 = service.get_session(second["session_id"])

@@ -762,7 +762,8 @@ def comfyui_new_script() -> str:
     const select = document.getElementById("workflow-select");
     select.innerHTML = `<option value="">${esc(T("No workflow"))}</option>` + workflows.map(workflow => {
       const badge = workflow.verification_state === "live_verified" ? ` · ${T("verified")}` : ` · ${workflow.status || "new"}`;
-      return `<option value="${esc(workflow.id)}">${esc((workflow.name || workflow.hash_prefix || workflow.id) + badge)}</option>`;
+      const warm = workflow.warm_volume ? ` ♨ ${T("warm")} (${workflow.warm_volume.data_center_id})` : "";
+      return `<option value="${esc(workflow.id)}">${esc((workflow.name || workflow.hash_prefix || workflow.id) + badge + warm)}</option>`;
     }).join("");
     if (selectedId) select.value = selectedId;
   }
