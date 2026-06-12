@@ -111,12 +111,12 @@ python3 -m controller.server
 
 ## API
 
-界面上的每个操作都是 JSON API 调用（`GET /api/v1/capabilities` 列出约 37 个端点）：上传/分析/探测工作流、试算规划、会话生命周期、向运行中的 Pod 下载/移动模型、只增不减的卷扩容、输出采集、账单同步。`skills/runpod-controller/SKILL.md` 记录了 LLM agent 驱动控制器的完整流程——agent 全程接触不到供应商凭据；`skills/comfyui-proxy-api/` 则封装了运行中会话的 ComfyUI API（提交任务、轮询结果、列出模型），自动带上 RunPod 的 Cloudflare 代理对 POST 要求的浏览器请求头。
+界面上的每个操作都是 JSON API 调用（`GET /api/v1/capabilities` 列出约 37 个端点）：上传/分析/探测工作流、试算规划、会话生命周期、向运行中的 Pod 下载/移动模型、只增不减的卷扩容、输出采集、账单同步。`skills/runpod-controller/SKILL.md` 记录了 LLM agent 驱动控制器的完整流程——agent 全程接触不到供应商凭据。
 
 ## 开发
 
 ```bash
-python3 -m unittest discover -s tests   # 142 个测试，无网络、不创建付费资源
+python3 -m unittest discover -s tests   # 完整套件：无网络、不创建付费资源
 ```
 
 测试基于假供应商适配器运行；真实环境行为（S3 实现的怪癖、模板差异）记录在 `docs/runpod-controller-v1.md`。
